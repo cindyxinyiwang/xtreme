@@ -14,16 +14,19 @@
 # limitations under the License.
 
 REPO=$PWD
-MODEL=${1:-bert-base-multilingual-cased}
-GPU=${2:-0}
+GPU=${1:-0}
+MODEL=${2:-bert-base-multilingual-cased}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
-LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
+#LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
+LANGS="bn,hi,mr,ur"
+TRAIN_LANGS="bn,hi,mr,ur"
 NUM_EPOCHS=10
 MAX_LENGTH=128
+TAU=0.8
 LR=2e-5
 
 LC=""
@@ -45,7 +48,7 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCH}-MaxLen${MAX_LENGTH}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCH}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_tau${TAU}/"
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_tag.py \
   --data_dir $DATA_DIR \
@@ -65,10 +68,11 @@ python $REPO/third_party/run_tag.py \
   --do_eval \
   --do_predict \
   --predict_langs $LANGS \
-  --train_langs en \
+  --train_langs $TRAIN_LANGS \
   --log_file $OUTPUT_DIR/train.log \
   --eval_all_checkpoints \
   --eval_patience -1 \
   --overwrite_output_dir \
+  --tau $TAU \
   --save_only_best_checkpoint $LC
 

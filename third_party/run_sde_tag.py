@@ -33,10 +33,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data import RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
-from utils_tag import convert_examples_to_features
+from utils_tag import convert_examples_to_sde_features, convert_examples_to_features
 from utils_tag import get_labels
 from utils_tag import read_examples_from_file
-import utils
 
 from transformers import (
   AdamW,
@@ -44,6 +43,7 @@ from transformers import (
   WEIGHTS_NAME,
   BertConfig,
   BertTokenizer,
+  SdeBertTokenizer,
   BertForTokenClassification,
   XLMConfig,
   XLMTokenizer,
@@ -143,11 +143,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
     for step, batch in enumerate(epoch_iterator):
       model.train()
       batch = tuple(t.to(args.device) for t in batch if t is not None)
-      if args.tau > 0:
-          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
-      else:
-          input_ids = batch[0]
-      inputs = {"input_ids": input_ids,
+      inputs = {"input_ids": batch[0],
             "attention_mask": batch[1],
             "labels": batch[3]}
 
@@ -336,7 +332,7 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
+  cached_features_file = os.path.join(args.data_dir, "cached_sde_bpeseg{}_ngram{}_{}_{}_{}_{}".format(args.bpe_segment, args.max_ngram_size, mode, lang,
     list(filter(None, args.model_name_or_path.split("/"))).pop(),
     str(args.max_seq_length)))
   if os.path.exists(cached_features_file) and not args.overwrite_cache:
@@ -350,7 +346,7 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
       data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
       logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
       examples = read_examples_from_file(data_file, lg, lang2id)
-      features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
+      features_lg = convert_examples_to_sde_features(examples, labels, args.max_seq_length, tokenizer,
                           cls_token_at_end=bool(args.model_type in ["xlnet"]),
                           cls_token=tokenizer.cls_token,
                           cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
@@ -360,7 +356,9 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
                           pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
                           pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
                           pad_token_label_id=pad_token_label_id,
-                          lang=lg
+                          lang=lg,
+                          max_ngram_size=args.max_ngram_size,
+                          bpe_segment=args.bpe_segment,
                           )
       features.extend(features_lg)
     if args.local_rank in [-1, 0]:
@@ -404,6 +402,11 @@ def main():
   parser.add_argument("--output_dir", default=None, type=str, required=True,
             help="The output directory where the model predictions and checkpoints will be written.")
 
+  ## SDE parameters
+  parser.add_argument("--max_ngram_size", default=10, type=int,
+            help="ngram size for each word")
+  parser.add_argument("--bpe_segment", type=int, default=1, help="whether to segment by BPE or by word")
+  parser.add_argument("--sde_latent", type=int, default=5000, help="sde latent emb size")
   ## Other parameters
   parser.add_argument("--labels", default="", type=str,
             help="Path to a file containing all labels. If not specified, NER/POS labels are used.")
@@ -485,8 +488,6 @@ def main():
             help="The languages in the training sets.")
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--eval_patience", type=int, default=-1, help="wait N times of decreasing dev score before early stop during training")
-
-  parser.add_argument("--tau", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -540,12 +541,19 @@ def main():
 
   args.model_type = args.model_type.lower()
   config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-  config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                      num_labels=num_labels,
-                      cache_dir=args.cache_dir if args.cache_dir else None)
   tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                         do_lower_case=args.do_lower_case,
                         cache_dir=args.cache_dir if args.cache_dir else None)
+  config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                      num_labels=num_labels,
+                      use_sde_embed=True,
+                      max_ngram_size=args.max_ngram_size,
+                      sde_latent=args.sde_latent,
+                      cls_token_id=tokenizer.cls_token_id,
+                      sep_token_id=tokenizer.sep_token_id,
+                      unk_token_id=tokenizer.unk_token_id,
+                      pad_token_id=tokenizer.pad_token_id,
+                      cache_dir=args.cache_dir if args.cache_dir else None)
 
   if args.init_checkpoint:
     logger.info("loading from init_checkpoint={}".format(args.init_checkpoint))

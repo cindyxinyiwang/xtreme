@@ -28,6 +28,7 @@ MAXL=128
 TRAIN_LANG="hi"
 LANGS="hi"
 LC=""
+SDE_LATENT=10000
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
 elif [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-mlm-tlm-xnli15-1024" ]; then
@@ -45,10 +46,10 @@ else
   GRAD_ACC=4
 fi
 
-SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}/"
+SAVE_DIR="$OUT_DIR/$TASK/sde_init_lat${SDE_LATENT}_${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}/"
 mkdir -p $SAVE_DIR
 
-python $PWD/third_party/run_classify.py \
+python $PWD/third_party/run_sde_classify.py \
   --model_type $MODEL_TYPE \
   --model_name_or_path $MODEL \
   --train_language $TRAIN_LANG \
@@ -69,4 +70,8 @@ python $PWD/third_party/run_classify.py \
   --predict_languages $LANGS \
   --save_only_best_checkpoint \
   --overwrite_output_dir \
+  --overwrite_cache \
+  --sde_latent $SDE_LATENT \
+  --max_ngram_size 30 \
+  --init_checkpoint /home/xinyiw/xtreme/outputs//panx/sde_lat10000_ngram30_pretrain_bert-base-multilingual-cased-LR5e-5-epoch-MaxLen128/checkpoint-best \
   --eval_test_set $LC

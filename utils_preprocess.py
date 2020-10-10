@@ -79,10 +79,11 @@ def panx_tokenize_preprocess(args):
     out_dir = os.path.join(args.output_dir, lang)
     if not os.path.exists(out_dir):
       os.makedirs(out_dir)
-    if lang == 'en':
-      files = ['dev', 'test', 'train']
-    else:
-      files = ['dev', 'test']
+    files = ['dev', 'test', 'train']
+    #if lang == 'en':
+    #  files = ['dev', 'test', 'train']
+    #else:
+    #  files = ['dev', 'test']
     for file in files:
       infile = os.path.join(args.data_dir, f'{file}-{lang}.tsv')
       outfile = os.path.join(out_dir, "{}.{}".format(file, args.model_name_or_path))
@@ -108,10 +109,11 @@ def panx_preprocess(args):
           idx = items[0].find(':')
           if idx != -1:
             token = items[0][idx+1:].strip()
-            if 'test' in infile:
-              fout.write(f'{token}\n')
-            else:
-              fout.write(f'{token}\t{label}\n')
+            #if 'test' in infile:
+            #  fout.write(f'{token}\n')
+            #else:
+            #  fout.write(f'{token}\t{label}\n')
+            fout.write(f'{token}\t{label}\n')
         else:
           fout.write('\n')
   if not os.path.exists(args.output_dir):
@@ -339,7 +341,8 @@ def xnli_preprocess(args):
       with open(outfile, 'w') as fout:
         writer = csv.writer(fout, delimiter='\t')
         for (sent1, sent2, label) in pairs:
-          if split == 'test':
+          #if split == 'test':
+          if False:
             writer.writerow([sent1, sent2])
           else:
             writer.writerow([sent1, sent2, label])
@@ -359,11 +362,12 @@ def xnli_preprocess(args):
         writer.writerow([sent1, sent2, label])
     print(f'finish preprocess {outfile}')
 
-  infile = os.path.join(args.data_dir, 'XNLI-MT-1.0/multinli/multinli.train.en.tsv')
-  if not os.path.exists(args.output_dir):
-    os.makedirs(args.output_dir)
-  outfile = os.path.join(args.output_dir, 'train-en.tsv')
-  _preprocess_train_file(infile, outfile)
+  for lang in ["en", 'fr', 'es', 'de', 'el', 'bg', 'ru', 'tr', 'ar', 'vi', 'th', 'zh', 'hi', 'sw', 'ur']:
+    infile = os.path.join(args.data_dir, 'XNLI-MT-1.0/multinli/multinli.train.{}.tsv'.format(lang))
+    if not os.path.exists(args.output_dir):
+      os.makedirs(args.output_dir)
+    outfile = os.path.join(args.output_dir, 'train-{}.tsv'.format(lang))
+    _preprocess_train_file(infile, outfile)
 
   for split in ['test', 'dev']:
     infile = os.path.join(args.data_dir, 'XNLI-1.0/xnli.{}.tsv'.format(split))

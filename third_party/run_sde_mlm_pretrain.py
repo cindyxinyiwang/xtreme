@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fine-tuning models for NER and POS tagging."""
+"""Pretrain SDE model."""
 
 from __future__ import absolute_import, division, print_function
 
@@ -33,10 +33,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data import RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
-from utils_tag import convert_examples_to_features
+from utils_tag import create_sde_pretrain_vocab_features 
 from utils_tag import get_labels
 from utils_tag import read_examples_from_file
-import utils
 
 from transformers import (
   AdamW,
@@ -44,7 +43,9 @@ from transformers import (
   WEIGHTS_NAME,
   BertConfig,
   BertTokenizer,
+  SdeBertTokenizer,
   BertForTokenClassification,
+  BertForMaskedLM,
   XLMConfig,
   XLMTokenizer,
   XLMRobertaConfig,
@@ -63,7 +64,7 @@ ALL_MODELS = sum(
 )
 
 MODEL_CLASSES = {
-  "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
+  "bert": (BertConfig, BertForMaskedLM, BertTokenizer),
   "xlm": (XLMConfig, XLMForTokenClassification, XLMTokenizer),
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
@@ -77,7 +78,7 @@ def set_seed(args):
     torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
+def train(args, train_dataset, sde_model, model, tokenizer, labels, pad_token_label_id, lang2id=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
@@ -95,9 +96,9 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   # Prepare optimizer and schedule (linear warmup and decay)
   no_decay = ["bias", "LayerNorm.weight"]
   optimizer_grouped_parameters = [
-    {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+    {"params": [p for n, p in sde_model.named_parameters() if not any(nd in n for nd in no_decay)],
      "weight_decay": args.weight_decay},
-    {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
+    {"params": [p for n, p in sde_model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
   ]
   optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
@@ -106,15 +107,15 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
       from apex import amp
     except ImportError:
       raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-    model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+    sde_model, optimizer = amp.initialize(sde_model, optimizer, opt_level=args.fp16_opt_level)
 
   # multi-gpu training (should be after apex fp16 initialization)
   if args.n_gpu > 1:
-    model = torch.nn.DataParallel(model)
+    sde_model = torch.nn.DataParallel(sde_model)
 
   # Distributed training (should be after apex fp16 initialization)
   if args.local_rank != -1:
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
+    sde_model = torch.nn.parallel.DistributedDataParallel(sde_model, device_ids=[args.local_rank],
                               output_device=args.local_rank,
                               find_unused_parameters=True)
 
@@ -129,37 +130,28 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
-  best_score = 0.0
+  best_score = 10000
   best_checkpoint = None
   patience = 0
   global_step = 0
   tr_loss, logging_loss = 0.0, 0.0
-  model.zero_grad()
+  sde_model.zero_grad()
   train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
   set_seed(args) # Add here for reproductibility (even between python 2 and 3)
 
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, batch in enumerate(epoch_iterator):
-      model.train()
+      sde_model.train()
       batch = tuple(t.to(args.device) for t in batch if t is not None)
-      if args.tau > 0:
-          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
-      else:
-          input_ids = batch[0]
-      inputs = {"input_ids": input_ids,
-            "attention_mask": batch[1],
-            "labels": batch[3]}
-
-      if args.model_type != "distilbert":
-        # XLM and RoBERTa don"t use segment_ids
-        inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
-
-      if args.model_type == "xlm":
-        inputs["langs"] = batch[4]
-
-      outputs = model(**inputs)
-      loss = outputs[0]
+      input_ids = batch[0]
+      labels = batch[3]
+      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(input_ids) 
+      subword_embedding = model.bert.embeddings.word_embeddings(labels)
+      mse_loss = torch.nn.MSELoss(reduction='none')
+      loss = mse_loss(sde_embedding, subword_embedding)
+      num_words = labels.numel()
+      loss = loss.sum() / num_words
 
       if args.n_gpu > 1:
         # mean() to average on multi-gpu parallel training
@@ -182,14 +174,14 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
         scheduler.step()  # Update learning rate schedule
         optimizer.step()
-        model.zero_grad()
+        sde_model.zero_grad()
         global_step += 1
 
         if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
           # Log metrics
           if args.local_rank == -1 and args.evaluate_during_training:
             # Only evaluate on single GPU otherwise metrics may not average well
-            results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.train_langs, lang2id=lang2id)
+            results, _ = evaluate(args, sde_model, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.train_langs, lang2id=lang2id)
             for key, value in results.items():
               tb_writer.add_scalar("eval_{}".format(key), value, global_step)
           tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
@@ -198,17 +190,17 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
         if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
           if args.save_only_best_checkpoint:
-            result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
-            if result["f1"] > best_score:
-              logger.info("result['f1']={} > best_score={}".format(result["f1"], best_score))
-              best_score = result["f1"]
+            result, _ = evaluate(args, sde_model, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
+            if result["loss"] < best_score:
+              logger.info("result['loss']={} < best_score={}".format(result["loss"], best_score))
+              best_score = result["loss"]
               # Save the best model checkpoint
               output_dir = os.path.join(args.output_dir, "checkpoint-best")
               best_checkpoint = output_dir
               if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
               # Take care of distributed/parallel training
-              model_to_save = model.module if hasattr(model, "module") else model
+              model_to_save = sde_model.module if hasattr(sde_model, "module") else sde_model
               model_to_save.save_pretrained(output_dir)
               torch.save(args, os.path.join(output_dir, "training_args.bin"))
               logger.info("Saving the best model checkpoint to %s", output_dir)
@@ -230,7 +222,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
             if not os.path.exists(output_dir):
               os.makedirs(output_dir)
             # Take care of distributed/parallel training
-            model_to_save = model.module if hasattr(model, "module") else model
+            model_to_save = sde_model.module if hasattr(sde_model, "module") else sde_model
             model_to_save.save_pretrained(output_dir)
             torch.save(args, os.path.join(output_dir, "training_args.bin"))
             logger.info("Saving model checkpoint to %s", output_dir)
@@ -248,8 +240,8 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix="", lang="en", lang2id=None, print_result=True):
-  eval_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode=mode, lang=lang, lang2id=lang2id)
+def evaluate(args, sde_model, model, tokenizer, labels, pad_token_label_id, mode, prefix="", lang="en", lang2id=None, print_result=True):
+  eval_dataset = load_and_cache_examples(args, tokenizer)
 
   args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
   # Note that DistributedSampler samples randomly
@@ -269,56 +261,30 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
   preds = None
   out_label_ids = None
   model.eval()
+  sde_model.eval()
   for batch in tqdm(eval_dataloader, desc="Evaluating"):
     batch = tuple(t.to(args.device) for t in batch)
 
     with torch.no_grad():
-      inputs = {"input_ids": batch[0],
-            "attention_mask": batch[1],
-            "labels": batch[3]}
-      if args.model_type != "distilbert":
-        # XLM and RoBERTa don"t use segment_ids
-        inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
-      if args.model_type == 'xlm':
-        inputs["langs"] = batch[4]
-      outputs = model(**inputs)
-      tmp_eval_loss, logits = outputs[:2]
-
-      if args.n_gpu > 1:
-        # mean() to average on multi-gpu parallel evaluating
-        tmp_eval_loss = tmp_eval_loss.mean()
+      input_ids = batch[0]
+      labels = batch[3]
+      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(input_ids) 
+      subword_embedding = model.bert.embeddings.word_embeddings(labels)
+      mse_loss = torch.nn.MSELoss(reduction='none')
+      loss = mse_loss(sde_embedding, subword_embedding)
+      num_words = labels.numel()
+      tmp_eval_loss = loss.sum() / num_words
 
       eval_loss += tmp_eval_loss.item()
-    nb_eval_steps += 1
-    if preds is None:
-      preds = logits.detach().cpu().numpy()
-      out_label_ids = inputs["labels"].detach().cpu().numpy()
-    else:
-      preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-      out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
+      nb_eval_steps += 1
 
   if nb_eval_steps == 0:
-    results = {k: 0 for k in ["loss", "precision", "recall", "f1"]}
+    results = {k: 0 for k in ["loss"]}
   else:
     eval_loss = eval_loss / nb_eval_steps
-    preds = np.argmax(preds, axis=2)
-
-    label_map = {i: label for i, label in enumerate(labels)}
-
-    out_label_list = [[] for _ in range(out_label_ids.shape[0])]
-    preds_list = [[] for _ in range(out_label_ids.shape[0])]
-
-    for i in range(out_label_ids.shape[0]):
-      for j in range(out_label_ids.shape[1]):
-        if out_label_ids[i, j] != pad_token_label_id:
-          out_label_list[i].append(label_map[out_label_ids[i][j]])
-          preds_list[i].append(label_map[preds[i][j]])
 
     results = {
       "loss": eval_loss,
-      "precision": precision_score(out_label_list, preds_list),
-      "recall": recall_score(out_label_list, preds_list),
-      "f1": f1_score(out_label_list, preds_list)
     }
 
   if print_result:
@@ -326,68 +292,40 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
     for key in sorted(results.keys()):
       logger.info("  %s = %s", key, str(results[key]))
 
-  return results, preds_list
+  return results, None 
 
 
-def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1):
+def load_and_cache_examples(args, tokenizer):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
-    list(filter(None, args.model_name_or_path.split("/"))).pop(),
+  cached_features_file = os.path.join(args.data_dir, "cached_pretrain_sde_vocab_ngram{}_{}".format(str(args.max_ngram_size),
     str(args.max_seq_length)))
   if os.path.exists(cached_features_file) and not args.overwrite_cache:
     logger.info("Loading features from cached file %s", cached_features_file)
-    features = torch.load(cached_features_file)
+    features_vocab = torch.load(cached_features_file)
   else:
-    langs = lang.split(',')
-    logger.info("all languages = {}".format(lang))
-    features = []
-    for lg in langs:
-      data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
-      logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
-      examples = read_examples_from_file(data_file, lg, lang2id)
-      features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
-                          cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                          cls_token=tokenizer.cls_token,
-                          cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                          sep_token=tokenizer.sep_token,
-                          sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
-                          pad_on_left=bool(args.model_type in ["xlnet"]),
-                          pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                          pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-                          pad_token_label_id=pad_token_label_id,
-                          lang=lg
-                          )
-      features.extend(features_lg)
+    features_vocab = create_sde_pretrain_vocab_features(args.max_seq_length, tokenizer,
+                        max_ngram_size=args.max_ngram_size
+                        )
     if args.local_rank in [-1, 0]:
-      logger.info("Saving features into cached file {}, len(features)={}".format(cached_features_file, len(features)))
-      torch.save(features, cached_features_file)
+      logger.info("Saving features into cached file {}, len(features)={}".format(cached_features_file, len(features_vocab)))
+      torch.save(features_vocab, cached_features_file)
 
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank == 0 and not evaluate:
     torch.distributed.barrier()
 
-  if few_shot > 0 and mode == 'train':
-    logger.info("Original no. of examples = {}".format(len(features)))
-    features = features[: few_shot]
-    logger.info('Using few-shot learning on {} examples'.format(len(features)))
-
   # Convert to Tensors and build dataset
-  all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-  all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
-  all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-  all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-  if args.model_type == 'xlm' and features[0].langs is not None:
-    all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
-    logger.info('all_langs[0] = {}'.format(all_langs[0]))
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
-  else:
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+  all_input_ids = torch.tensor([f.input_ids for f in features_vocab], dtype=torch.long)
+  all_input_mask = torch.tensor([f.input_mask for f in features_vocab], dtype=torch.long)
+  all_segment_ids = torch.tensor([f.segment_ids for f in features_vocab], dtype=torch.long)
+  all_label_ids = torch.tensor([f.label_ids for f in features_vocab], dtype=torch.long)
+  dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
 
@@ -403,6 +341,12 @@ def main():
             help="Path to pre-trained model or shortcut name selected in the list: " + ", ".join(ALL_MODELS))
   parser.add_argument("--output_dir", default=None, type=str, required=True,
             help="The output directory where the model predictions and checkpoints will be written.")
+
+  ## SDE parameters
+  parser.add_argument("--max_ngram_size", default=10, type=int,
+            help="ngram size for each word")
+  parser.add_argument("--bpe_segment", type=int, default=1, help="whether to segment by BPE or by word")
+  parser.add_argument("--sde_latent", type=int, default=5000, help="sde latent emb size")
 
   ## Other parameters
   parser.add_argument("--labels", default="", type=str,
@@ -485,8 +429,6 @@ def main():
             help="The languages in the training sets.")
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--eval_patience", type=int, default=-1, help="wait N times of decreasing dev score before early stop during training")
-
-  parser.add_argument("--tau", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -540,17 +482,38 @@ def main():
 
   args.model_type = args.model_type.lower()
   config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-  config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                      num_labels=num_labels,
-                      cache_dir=args.cache_dir if args.cache_dir else None)
   tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                         do_lower_case=args.do_lower_case,
                         cache_dir=args.cache_dir if args.cache_dir else None)
+  config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                      num_labels=num_labels,
+                      max_ngram_size=args.max_ngram_size,
+                      cls_token_id=tokenizer.cls_token_id,
+                      sep_token_id=tokenizer.sep_token_id,
+                      unk_token_id=tokenizer.unk_token_id,
+                      pad_token_id=tokenizer.pad_token_id,
+                      cache_dir=args.cache_dir if args.cache_dir else None)
+
+  sde_config_class, sde_model_class, sde_tokenizer_class = MODEL_CLASSES[args.model_type]
+  sde_config = sde_config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                      num_labels=num_labels,
+                      use_sde_embed=True,
+                      sde_latent=args.sde_latent,
+                      max_ngram_size=args.max_ngram_size,
+                      cls_token_id=tokenizer.cls_token_id,
+                      sep_token_id=tokenizer.sep_token_id,
+                      unk_token_id=tokenizer.unk_token_id,
+                      pad_token_id=tokenizer.pad_token_id,
+                      cache_dir=args.cache_dir if args.cache_dir else None)
+
 
   if args.init_checkpoint:
     logger.info("loading from init_checkpoint={}".format(args.init_checkpoint))
     model = model_class.from_pretrained(args.init_checkpoint,
                                         config=config,
+                                        cache_dir=args.init_checkpoint)
+    sde_model = sde_model_class.from_pretrained(args.init_checkpoint,
+                                        config=sde_config,
                                         cache_dir=args.init_checkpoint)
   else:
     logger.info("loading from cached model = {}".format(args.model_name_or_path))
@@ -558,19 +521,26 @@ def main():
                       from_tf=bool(".ckpt" in args.model_name_or_path),
                       config=config,
                       cache_dir=args.cache_dir if args.cache_dir else None)
+    sde_model = sde_model_class.from_pretrained(args.model_name_or_path,
+                      from_tf=bool(".ckpt" in args.model_name_or_path),
+                      config=sde_config,
+                      cache_dir=args.cache_dir if args.cache_dir else None)
+
   lang2id = config.lang2id if args.model_type == "xlm" else None
   logger.info("Using lang2id = {}".format(lang2id))
 
   # Make sure only the first process in distributed training loads model/vocab
   if args.local_rank == 0:
     torch.distributed.barrier()
+  model.requires_grad = False
   model.to(args.device)
+  sde_model.to(args.device)
   logger.info("Training/evaluation parameters %s", args)
 
   # Training
   if args.do_train:
-    train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
+    train_dataset = load_and_cache_examples(args, tokenizer)
+    global_step, tr_loss = train(args, train_dataset, sde_model, model, tokenizer, labels, pad_token_label_id, lang2id)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,
@@ -584,9 +554,9 @@ def main():
     # They can then be reloaded using `from_pretrained()`
     # Take care of distributed/parallel training
     logger.info("Saving model checkpoint to %s", args.output_dir)
-    model_to_save = model.module if hasattr(model, "module") else model
+    model_to_save = sde_model.module if hasattr(sde_model, "module") else sde_model
     model_to_save.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    sde_tokenizer.save_pretrained(args.output_dir)
 
     # Good practice: save your training arguments together with the model
     torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
@@ -600,106 +570,6 @@ def main():
   else:
     best_checkpoint = args.output_dir
   best_f1 = 0
-
-  # Evaluation
-  if args.do_eval and args.local_rank in [-1, 0]:
-    tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-    checkpoints = [args.output_dir]
-    if args.eval_all_checkpoints:
-      checkpoints = list(os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True)))
-      logging.getLogger("pytorch_transformers.modeling_utils").setLevel(logging.WARN)
-    logger.info("Evaluate the following checkpoints: %s", checkpoints)
-
-    for checkpoint in checkpoints:
-      global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
-      model = model_class.from_pretrained(checkpoint)
-      model.to(args.device)
-      result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
-      if result["f1"] > best_f1:
-        best_checkpoint = checkpoint
-        best_f1 = result["f1"]
-      if global_step:
-        result = {"{}_{}".format(global_step, k): v for k, v in result.items()}
-      results.update(result)
-
-    output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
-    with open(output_eval_file, "w") as writer:
-      for key in sorted(results.keys()):
-        writer.write("{} = {}\n".format(key, str(results[key])))
-      writer.write("best checkpoint = {}, best f1 = {}\n".format(best_checkpoint, best_f1))
-
-  # Prediction
-  if args.do_predict and args.local_rank in [-1, 0]:
-    logger.info("Loading the best checkpoint from {}\n".format(best_checkpoint))
-    tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-    model = model_class.from_pretrained(best_checkpoint)
-    model.to(args.device)
-
-    output_test_results_file = os.path.join(args.output_dir, "test_results.txt")
-    with open(output_test_results_file, "a") as result_writer:
-      for lang in args.predict_langs.split(','):
-        if not os.path.exists(os.path.join(args.data_dir, lang, 'test.{}'.format(args.model_name_or_path))):
-          logger.info("Language {} does not exist".format(lang))
-          continue
-        result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="test", lang=lang, lang2id=lang2id)
-
-        # Save results
-        result_writer.write("=====================\nlanguage={}\n".format(lang))
-        for key in sorted(result.keys()):
-          result_writer.write("{} = {}\n".format(key, str(result[key])))
-        # Save predictions
-        output_test_predictions_file = os.path.join(args.output_dir, "test_{}_predictions.txt".format(lang))
-        infile = os.path.join(args.data_dir, lang, "test.{}".format(args.model_name_or_path))
-        idxfile = infile + '.idx'
-        save_predictions(args, predictions, output_test_predictions_file, infile, idxfile)
-
-  # Predict dev set
-  if args.do_predict_dev and args.local_rank in [-1, 0]:
-    logger.info("Loading the best checkpoint from {}\n".format(best_checkpoint))
-    tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-    model = model_class.from_pretrained(best_checkpoint)
-    model.to(args.device)
-
-    output_test_results_file = os.path.join(args.output_dir, "dev_results.txt")
-    with open(output_test_results_file, "w") as result_writer:
-      for lang in args.predict_langs.split(','):
-        if not os.path.exists(os.path.join(args.data_dir, lang, 'dev.{}'.format(args.model_name_or_path))):
-          logger.info("Language {} does not exist".format(lang))
-          continue
-        result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=lang, lang2id=lang2id)
-
-        # Save results
-        result_writer.write("=====================\nlanguage={}\n".format(lang))
-        for key in sorted(result.keys()):
-          result_writer.write("{} = {}\n".format(key, str(result[key])))
-        # Save predictions
-        output_test_predictions_file = os.path.join(args.output_dir, "dev_{}_predictions.txt".format(lang))
-        infile = os.path.join(args.data_dir, lang, "dev.{}".format(args.model_name_or_path))
-        idxfile = infile + '.idx'
-        save_predictions(args, predictions, output_test_predictions_file, infile, idxfile)
-
-def save_predictions(args, predictions, output_file, text_file, idx_file, output_word_prediction=False):
-  # Save predictions
-  with open(text_file, "r") as text_reader, open(idx_file, "r") as idx_reader:
-    text = text_reader.readlines()
-    index = idx_reader.readlines()
-    assert len(text) == len(index)
-
-  # Sanity check on the predictions
-  with open(output_file, "w") as writer:
-    example_id = 0
-    prev_id = int(index[0])
-    for line, idx in zip(text, index):
-      if line == "" or line == "\n":
-        example_id += 1
-      else:
-        cur_id = int(idx)
-        output_line = '\n' if cur_id != prev_id else ''
-        if output_word_prediction:
-          output_line += line.split()[0] + '\t'
-        output_line += predictions[example_id].pop(0) + '\n'
-        writer.write(output_line)
-        prev_id = cur_id
 
 if __name__ == "__main__":
   main()

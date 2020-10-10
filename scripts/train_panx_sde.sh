@@ -20,13 +20,16 @@ DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
-
-TASK='xnli'
+TASK='panx'
+#LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
+LANGS="bn,hi,mr,ur"
+TRAIN_LANGS="hi"
+NUM_EPOCHS=10
+MAX_LENGTH=128
 LR=2e-5
-EPOCH=5
-MAXL=128
-TRAIN_LANG="hi"
-LANGS="hi"
+BPE_SEG=0
+SDE_LATENT=10000
+
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -45,28 +48,35 @@ else
   GRAD_ACC=4
 fi
 
-SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}/"
-mkdir -p $SAVE_DIR
-
-python $PWD/third_party/run_classify.py \
+DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
+OUTPUT_DIR="$OUT_DIR/$TASK/sde_init_lat${SDE_LATENT}_bpeseg${BPE_SEG}_${MODEL}-LR${LR}-epoch${NUM_EPOCH}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}/"
+mkdir -p $OUTPUT_DIR
+python $REPO/third_party/run_sde_tag.py \
+  --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
+  --labels $DATA_DIR/labels.txt \
   --model_name_or_path $MODEL \
-  --train_language $TRAIN_LANG \
-  --task_name $TASK \
+  --output_dir $OUTPUT_DIR \
+  --max_seq_length  $MAX_LENGTH \
+  --num_train_epochs $NUM_EPOCHS \
+  --gradient_accumulation_steps $GRAD_ACC \
+  --per_gpu_train_batch_size $BATCH_SIZE \
+  --per_gpu_eval_batch_size 32 \
+  --save_steps 1000 \
+  --seed 1 \
+  --learning_rate $LR \
   --do_train \
   --do_eval \
   --do_predict \
-  --data_dir $DATA_DIR/${TASK} \
-  --gradient_accumulation_steps $GRAD_ACC \
-  --per_gpu_train_batch_size $BATCH_SIZE \
-  --learning_rate $LR \
-  --num_train_epochs $EPOCH \
-  --max_seq_length $MAXL \
-  --output_dir $SAVE_DIR/ \
-  --save_steps 100 \
+  --predict_langs $LANGS \
+  --train_langs $TRAIN_LANGS \
+  --log_file $OUTPUT_DIR/train.log \
   --eval_all_checkpoints \
-  --log_file 'train' \
-  --predict_languages $LANGS \
-  --save_only_best_checkpoint \
+  --eval_patience -1 \
+  --bpe_segment $BPE_SEG\
+  --max_ngram_size 10 \
+  --sde_latent $SDE_LATENT \
   --overwrite_output_dir \
-  --eval_test_set $LC
+  --init_checkpoint /home/xinyiw/xtreme/outputs//panx/sde_lat10000_ngram30_pretrain_bert-base-multilingual-cased-LR5e-5-epoch-MaxLen128/checkpoint-best \
+  --save_only_best_checkpoint $LC
+

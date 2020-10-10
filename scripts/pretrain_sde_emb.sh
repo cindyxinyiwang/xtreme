@@ -20,13 +20,16 @@ DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
+TASK='panx'
+LANGS="en"
+TRAIN_LANGS="en"
+NUM_EPOCHS=1000
+MAX_LENGTH=128
+LR=5e-5
+BPE_SEG=0
+SDE_LATENT=10000
+MAX_NGRAM=30
 
-TASK='xnli'
-LR=2e-5
-EPOCH=5
-MAXL=128
-TRAIN_LANG="hi"
-LANGS="hi"
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -45,28 +48,32 @@ else
   GRAD_ACC=4
 fi
 
-SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}/"
-mkdir -p $SAVE_DIR
-
-python $PWD/third_party/run_classify.py \
+DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
+OUTPUT_DIR="$OUT_DIR/$TASK/sde_lat${SDE_LATENT}_ngram${MAX_NGRAM}_pretrain_${MODEL}-LR${LR}-epoch${NUM_EPOCH}-MaxLen${MAX_LENGTH}/"
+mkdir -p $OUTPUT_DIR
+python $REPO/third_party/run_sde_pretrain.py \
+  --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
+  --labels $DATA_DIR/labels.txt \
   --model_name_or_path $MODEL \
-  --train_language $TRAIN_LANG \
-  --task_name $TASK \
-  --do_train \
-  --do_eval \
-  --do_predict \
-  --data_dir $DATA_DIR/${TASK} \
+  --output_dir $OUTPUT_DIR \
+  --max_seq_length  $MAX_LENGTH \
+  --num_train_epochs $NUM_EPOCHS \
   --gradient_accumulation_steps $GRAD_ACC \
   --per_gpu_train_batch_size $BATCH_SIZE \
-  --learning_rate $LR \
-  --num_train_epochs $EPOCH \
-  --max_seq_length $MAXL \
-  --output_dir $SAVE_DIR/ \
+  --per_gpu_eval_batch_size 32 \
   --save_steps 100 \
+  --seed 1 \
+  --learning_rate $LR \
+  --do_train \
+  --predict_langs $LANGS \
+  --train_langs $TRAIN_LANGS \
+  --log_file $OUTPUT_DIR/train.log \
   --eval_all_checkpoints \
-  --log_file 'train' \
-  --predict_languages $LANGS \
-  --save_only_best_checkpoint \
+  --eval_patience -1 \
+  --bpe_segment $BPE_SEG\
+  --max_ngram_size ${MAX_NGRAM} \
+  --sde_latent $SDE_LATENT \
   --overwrite_output_dir \
-  --eval_test_set $LC
+  --save_only_best_checkpoint $LC
+
