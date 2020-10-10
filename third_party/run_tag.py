@@ -143,10 +143,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
     for step, batch in enumerate(epoch_iterator):
       model.train()
       batch = tuple(t.to(args.device) for t in batch if t is not None)
-      if args.tau > 0:
-          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
-      else:
-          input_ids = batch[0]
+      input_ids = batch[0]
       inputs = {"input_ids": input_ids,
             "attention_mask": batch[1],
             "labels": batch[3]}
@@ -172,6 +169,33 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           scaled_loss.backward()
       else:
         loss.backward()
+
+      if args.tau > 0:
+          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
+          inputs = {"input_ids": input_ids,
+                "attention_mask": batch[1],
+                "labels": batch[3]}
+
+          if args.model_type != "distilbert":
+            # XLM and RoBERTa don"t use segment_ids
+            inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
+
+          if args.model_type == "xlm":
+            inputs["langs"] = batch[4]
+
+          outputs = model(**inputs)
+          aug_loss = outputs[0]
+
+          if args.n_gpu > 1:
+            # mean() to average on multi-gpu parallel training
+            aug_loss = aug_loss.mean()
+          if args.gradient_accumulation_steps > 1:
+            aug_loss = aug_loss / args.gradient_accumulation_steps
+          if args.fp16:
+            with amp.scale_loss(aug_lossloss, optimizer) as scaled_loss:
+              scaled_loss.backward()
+          else:
+            aug_loss.backward()
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:

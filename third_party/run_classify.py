@@ -53,6 +53,7 @@ try:
   from torch.utils.tensorboard import SummaryWriter
 except ImportError:
   from tensorboardX import SummaryWriter
+import utils
 
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,10 @@ def train(args, train_dataset, model, tokenizer, lang2id=None):
 
       model.train()
       batch = tuple(t.to(args.device) for t in batch)
+      if args.tau > 0:
+          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
+      else:
+          input_ids = batch[0]
       inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
       if args.model_type != "distilbert":
         inputs["token_type_ids"] = (
@@ -619,6 +624,7 @@ def main():
   parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
   parser.add_argument("--server_ip", type=str, default="", help="For distant debugging.")
   parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
+  parser.add_argument("--tau", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
   args = parser.parse_args()
 
   if (
