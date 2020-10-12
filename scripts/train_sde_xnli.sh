@@ -70,7 +70,6 @@ python $PWD/third_party/run_sde_classify.py \
   --predict_languages $LANGS \
   --save_only_best_checkpoint \
   --overwrite_output_dir \
-  --overwrite_cache \
   --sde_latent $SDE_LATENT \
   --max_ngram_size 30 \
   --init_checkpoint /home/xinyiw/xtreme/outputs//panx/sde_lat10000_ngram30_pretrain_bert-base-multilingual-cased-LR5e-5-epoch-MaxLen128/checkpoint-best \

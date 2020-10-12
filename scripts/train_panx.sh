@@ -16,17 +16,21 @@
 REPO=$PWD
 GPU=${1:-0}
 MODEL=${2:-bert-base-multilingual-cased}
+#MODEL=${2:-xlm-roberta-base}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
 #LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
-LANGS="bn,hi,mr,ur"
-TRAIN_LANGS="bn,hi,mr,ur"
+LANGS="ar"
+TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
-TAU=0.8
+MLM_WEIGHT=0.01
+MLM_LANG='ar'
+OPTIM='RecAdam'
+MLM_START=8
 LR=2e-5
 
 LC=""
@@ -48,8 +52,11 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCH}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_tau${TAU}/"
+#OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_optim${OPTIM}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_optim${OPTIM}/"
 mkdir -p $OUTPUT_DIR
+#  --do_eval \
+#  --do_train \
 python $REPO/third_party/run_tag.py \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
@@ -64,8 +71,6 @@ python $REPO/third_party/run_tag.py \
   --save_steps 1000 \
   --seed 1 \
   --learning_rate $LR \
-  --do_train \
-  --do_eval \
   --do_predict \
   --predict_langs $LANGS \
   --train_langs $TRAIN_LANGS \
@@ -73,6 +78,8 @@ python $REPO/third_party/run_tag.py \
   --eval_all_checkpoints \
   --eval_patience -1 \
   --overwrite_output_dir \
-  --tau $TAU \
+  --optimizer $OPTIM \
+  --mlm_weight $MLM_WEIGHT \
+  --mlm_lang $MLM_LANG \
   --save_only_best_checkpoint $LC
 

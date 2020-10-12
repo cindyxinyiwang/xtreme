@@ -96,9 +96,9 @@ def train(args, train_dataset, sde_model, model, tokenizer, labels, pad_token_la
   # Prepare optimizer and schedule (linear warmup and decay)
   no_decay = ["bias", "LayerNorm.weight"]
   optimizer_grouped_parameters = [
-    {"params": [p for n, p in sde_model.named_parameters() if not any(nd in n for nd in no_decay)],
+    {"params": [p for n, p in sde_model.bert.embeddings.sde_word_embeddings.named_parameters() if not any(nd in n for nd in no_decay)],
      "weight_decay": args.weight_decay},
-    {"params": [p for n, p in sde_model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
+    {"params": [p for n, p in sde_model.bert.embeddings.sde_word_embeddings.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
   ]
   optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
@@ -146,8 +146,8 @@ def train(args, train_dataset, sde_model, model, tokenizer, labels, pad_token_la
       batch = tuple(t.to(args.device) for t in batch if t is not None)
       input_ids = batch[0]
       labels = batch[3]
-      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(input_ids) 
       subword_embedding = model.bert.embeddings.word_embeddings(labels)
+      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(labels) 
       mse_loss = torch.nn.MSELoss(reduction='none')
       loss = mse_loss(sde_embedding, subword_embedding)
       num_words = labels.numel()
@@ -268,7 +268,7 @@ def evaluate(args, sde_model, model, tokenizer, labels, pad_token_label_id, mode
     with torch.no_grad():
       input_ids = batch[0]
       labels = batch[3]
-      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(input_ids) 
+      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(labels) 
       subword_embedding = model.bert.embeddings.word_embeddings(labels)
       mse_loss = torch.nn.MSELoss(reduction='none')
       loss = mse_loss(sde_embedding, subword_embedding)
@@ -302,7 +302,7 @@ def load_and_cache_examples(args, tokenizer):
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  cached_features_file = os.path.join(args.data_dir, "cached_pretrain_sde_vocab_ngram{}_{}".format(str(args.max_ngram_size),
+  cached_features_file = os.path.join(args.data_dir, "cached_pretrain_sde_vocab_model{}_{}".format(args.model_type,
     str(args.max_seq_length)))
   if os.path.exists(cached_features_file) and not args.overwrite_cache:
     logger.info("Loading features from cached file %s", cached_features_file)
@@ -498,6 +498,7 @@ def main():
   sde_config = sde_config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                       num_labels=num_labels,
                       use_sde_embed=True,
+                      add_sde_embed=True,
                       sde_latent=args.sde_latent,
                       max_ngram_size=args.max_ngram_size,
                       cls_token_id=tokenizer.cls_token_id,
@@ -514,7 +515,8 @@ def main():
                                         cache_dir=args.init_checkpoint)
     sde_model = sde_model_class.from_pretrained(args.init_checkpoint,
                                         config=sde_config,
-                                        cache_dir=args.init_checkpoint)
+                                        cache_dir=args.init_checkpoint,
+                                        tokenizer=tokenizer)
   else:
     logger.info("loading from cached model = {}".format(args.model_name_or_path))
     model = model_class.from_pretrained(args.model_name_or_path,
@@ -524,7 +526,8 @@ def main():
     sde_model = sde_model_class.from_pretrained(args.model_name_or_path,
                       from_tf=bool(".ckpt" in args.model_name_or_path),
                       config=sde_config,
-                      cache_dir=args.cache_dir if args.cache_dir else None)
+                      cache_dir=args.cache_dir if args.cache_dir else None,
+                      tokenizer=tokenizer)
 
   lang2id = config.lang2id if args.model_type == "xlm" else None
   logger.info("Using lang2id = {}".format(lang2id))
@@ -533,8 +536,8 @@ def main():
   if args.local_rank == 0:
     torch.distributed.barrier()
   model.requires_grad = False
-  model.to(args.device)
-  sde_model.to(args.device)
+  model.bert.embeddings.word_embeddings.to(args.device)
+  sde_model.bert.embeddings.sde_word_embeddings.to(args.device)
   logger.info("Training/evaluation parameters %s", args)
 
   # Training
