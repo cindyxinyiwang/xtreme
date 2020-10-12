@@ -81,5 +81,6 @@ python $REPO/third_party/run_tag.py \
   --optimizer $OPTIM \
   --mlm_weight $MLM_WEIGHT \
   --mlm_lang $MLM_LANG \
+  --mlm_start_epoch $MLM_START \
   --save_only_best_checkpoint $LC
 

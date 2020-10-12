@@ -188,8 +188,10 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
   if train_dataset_mlm is not None:
     mlm_iter = iter(train_mlm_dataloader)
-  for cur_epoch, _ in enumerate(train_iterator):
+  cur_epoch = 0
+  for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+    cur_epoch += 1
     for step, batch in enumerate(epoch_iterator):
       model.train()
       batch = tuple(t.to(args.device) for t in batch if t is not None)
