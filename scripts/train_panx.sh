@@ -22,8 +22,8 @@ OUT_DIR=${4:-"$REPO/outputs/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
-#LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
-LANGS="ar"
+LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
+LANGS="ur"
 TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
@@ -32,6 +32,7 @@ MLM_LANG='ar'
 OPTIM='RecAdam'
 MLM_START=8
 LR=2e-5
+ATTN_T=1
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -52,8 +53,14 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
-#OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_optim${OPTIM}/"
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_optim${OPTIM}/"
+if [ $MLM_WEIGHT == 0 ]; then
+  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_att${ATTN_T}/"
+else
+  #OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_optim${OPTIM}_att${ATTN_T}/"
+  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_optim${OPTIM}/"
+fi
+
+#OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_optim${OPTIM}/"
 mkdir -p $OUTPUT_DIR
 #  --do_eval \
 #  --do_train \
@@ -82,5 +89,6 @@ python $REPO/third_party/run_tag.py \
   --mlm_weight $MLM_WEIGHT \
   --mlm_lang $MLM_LANG \
   --mlm_start_epoch $MLM_START \
+  --attention_t $ATTN_T \
   --save_only_best_checkpoint $LC
 
