@@ -701,8 +701,7 @@ def main():
     model = model_class.from_pretrained(args.model_name_or_path,
                       from_tf=bool(".ckpt" in args.model_name_or_path),
                       config=config,
-                      cache_dir=args.cache_dir if args.cache_dir else None,
-                      tokenizer=tokenizer)
+                      cache_dir=args.cache_dir if args.cache_dir else None)
   lang2id = config.lang2id if args.model_type == "xlm" else None
   logger.info("Using lang2id = {}".format(lang2id))
 
@@ -761,7 +760,7 @@ def main():
 
     for checkpoint in checkpoints:
       global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
-      model = model_class.from_pretrained(checkpoint, tokenizer=tokenizer)
+      model = model_class.from_pretrained(checkpoint)
       model.to(args.device)
       result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
       if result["f1"] > best_f1:
@@ -781,7 +780,7 @@ def main():
   if args.do_predict and args.local_rank in [-1, 0]:
     logger.info("Loading the best checkpoint from {}\n".format(best_checkpoint))
     tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-    model = model_class.from_pretrained(best_checkpoint, tokenizer=tokenizer)
+    model = model_class.from_pretrained(best_checkpoint)
     model.to(args.device)
 
     output_test_results_file = os.path.join(args.output_dir, "test_results.txt")
