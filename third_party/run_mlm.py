@@ -46,6 +46,7 @@ from transformers import (
   BertConfig,
   BertTokenizer,
   BertForTokenClassification,
+  BertForMaskedLM,
   BertForMLMandTokenClassification,
   XLMConfig,
   XLMTokenizer,
@@ -65,8 +66,7 @@ ALL_MODELS = sum(
 )
 
 MODEL_CLASSES = {
-  "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
-  "bert_mlm": (BertConfig, BertForMLMandTokenClassification, BertTokenizer),
+  "bert": (BertConfig, BertForMaskedLM, BertTokenizer),
   "xlm": (XLMConfig, XLMForTokenClassification, XLMTokenizer),
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
@@ -146,7 +146,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
         ]
         optimizer = RecAdam(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon,
                             anneal_fun=args.recadam_anneal_fun, anneal_k=args.recadam_anneal_k,
-                            anneal_t0=args.recadam_anneal_t0, pretrain_cof=args.recadam_pretrain_cof, update_pretrained_epoch=args.update_pretrained_epoch)
+                            anneal_t0=args.recadam_anneal_t0, pretrain_cof=args.recadam_pretrain_cof)
 
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
   if args.fp16:
@@ -192,16 +192,15 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
-    if cur_epoch == args.update_pretrained_epoch and args.optimizer == 'RecAdam':
-      logger.info(" Update pretrained param at epoch {}".format(cur_epoch))
-      optimizer.update_pretrained()
     for step, batch in enumerate(epoch_iterator):
       model.train()
+      masked_inputs, masked_targets = utils.mask_tokens(batch[0], tokenizer)
       batch = tuple(t.to(args.device) for t in batch if t is not None)
-      input_ids = batch[0]
-      inputs = {"input_ids": input_ids,
+      masked_inputs = masked_inputs.to(args.device)
+      masked_targets = masked_targets.to(args.device)
+      inputs = {"input_ids": masked_inputs,
             "attention_mask": batch[1],
-            "labels": batch[3]}
+            "masked_lm_labels": masked_targets}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -212,29 +211,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
       outputs = model(**inputs)
       loss = outputs[0]
-      if train_dataset_mlm is not None and cur_epoch >= args.mlm_start_epoch and cur_epoch <= args.mlm_end_epoch:
-        try:
-          mlm_batch = next(mlm_iter)
-        except:
-          mlm_iter = iter(train_mlm_dataloader)
-          mlm_batch = next(mlm_iter)
-        masked_inputs, masked_targets = utils.mask_tokens(mlm_batch[0], tokenizer)
-        mlm_batch = tuple(t.to(args.device) for t in batch if t is not None)
-        masked_inputs = masked_inputs.to(args.device)
-        masked_targets = masked_targets.to(args.device)
-        mlm_inputs = {"input_ids": masked_inputs,
-              "attention_mask": mlm_batch[1],
-              "masked_lm_labels": masked_targets}
-        if args.model_type != "distilbert":
-          # XLM and RoBERTa don"t use segment_ids
-          inputs["token_type_ids"] = mlm_batch[2] if args.model_type in ["bert", "xlnet"] else None
-
-        if args.model_type == "xlm":
-          inputs["langs"] = mlm_batch[4]
-
-        mlm_outputs = model.forward_mlm(**mlm_inputs)
-        mlm_loss = mlm_outputs[0]
-        loss = loss + args.mlm_weight*mlm_loss
 
       if args.n_gpu > 1:
         # mean() to average on multi-gpu parallel training
@@ -247,33 +223,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           scaled_loss.backward()
       else:
         loss.backward()
-
-      if args.tau > 0:
-          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
-          inputs = {"input_ids": input_ids,
-                "attention_mask": batch[1],
-                "labels": batch[3]}
-
-          if args.model_type != "distilbert":
-            # XLM and RoBERTa don"t use segment_ids
-            inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
-
-          if args.model_type == "xlm":
-            inputs["langs"] = batch[4]
-
-          outputs = model(**inputs)
-          aug_loss = outputs[0]
-
-          if args.n_gpu > 1:
-            # mean() to average on multi-gpu parallel training
-            aug_loss = aug_loss.mean()
-          if args.gradient_accumulation_steps > 1:
-            aug_loss = aug_loss / args.gradient_accumulation_steps
-          if args.fp16:
-            with amp.scale_loss(aug_lossloss, optimizer) as scaled_loss:
-              scaled_loss.backward()
-          else:
-            aug_loss.backward()
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -602,10 +551,8 @@ def main():
   parser.add_argument("--mlm_weight", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--mlm_lang", type=str, default='ur', help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--mlm_start_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
-  parser.add_argument("--mlm_end_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
 
 
-  parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
   # RecAdam parameters
   parser.add_argument("--optimizer", type=str, default="RecAdam", choices=["Adam", "RecAdam"],
                       help="Choose the optimizer to use. Default RecAdam.")
@@ -678,11 +625,7 @@ def main():
     torch.distributed.barrier()
 
   args.model_type = args.model_type.lower()
-  if args.mlm_weight > 0:
-      #args.model_type = args.model_type+"_mlm"
-      config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type+"_mlm"]
-  else:
-      config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
+  config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
   config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                       num_labels=num_labels,
                       use_sde_embed=args.use_sde_embed,
@@ -710,7 +653,8 @@ def main():
     logger.info("loading from init_checkpoint={}".format(args.init_checkpoint))
     model = model_class.from_pretrained(args.init_checkpoint,
                                         config=config,
-                                        cache_dir=args.init_checkpoint)
+                                        cache_dir=args.init_checkpoint,
+                                        tokenizer=tokenizer)
   else:
     logger.info("loading from cached model = {}".format(args.model_name_or_path))
     model = model_class.from_pretrained(args.model_name_or_path,
@@ -729,10 +673,7 @@ def main():
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    if args.mlm_weight > 0:
-      train_dataset_mlm = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.mlm_lang, lang2id=lang2id, few_shot=args.few_shot)
-    else:
-      train_dataset_mlm = None
+    train_dataset_mlm = None
     global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model, train_dataset_mlm=train_dataset_mlm)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 

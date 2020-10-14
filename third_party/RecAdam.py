@@ -54,7 +54,7 @@ class RecAdam(Optimizer):
     """
 
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-6, weight_decay=0.0, correct_bias=True,
-                 anneal_fun='sigmoid', anneal_k=0, anneal_t0=0, anneal_w=1.0, pretrain_cof=5000.0, pretrain_params=None):
+                 anneal_fun='sigmoid', anneal_k=0, anneal_t0=0, anneal_w=1.0, pretrain_cof=5000.0, pretrain_params=None, update_pretrained_epoch=0):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {} - should be >= 0.0".format(lr))
         if not 0.0 <= betas[0] < 1.0:
@@ -63,11 +63,23 @@ class RecAdam(Optimizer):
             raise ValueError("Invalid beta parameter: {} - should be in [0.0, 1.0[".format(betas[1]))
         if not 0.0 <= eps:
             raise ValueError("Invalid epsilon value: {} - should be >= 0.0".format(eps))
+        self.updated = False
+        if update_pretrained_epoch <=1:
+            self.updated = True
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, correct_bias=correct_bias,
                         anneal_fun=anneal_fun, anneal_k=anneal_k, anneal_t0=anneal_t0, anneal_w=anneal_w,
-                        pretrain_cof=pretrain_cof, pretrain_params=pretrain_params)
+                        pretrain_cof=pretrain_cof, pretrain_params=pretrain_params, updated=self.updated)
         super().__init__(params, defaults)
+        self.update_pretrained_epoch = update_pretrained_epoch
 
+    def update_pretrained(self, closure=None):
+        for group in self.param_groups:
+            for p, pp in zip(group["params"], group["pretrain_params"]):
+                if p.grad is None:
+                    continue
+                pp = p.clone().detach()
+        self.updated = True
+ 
     def step(self, closure=None):
         """Performs a single optimization step.
 
@@ -116,7 +128,7 @@ class RecAdam(Optimizer):
                 # With RecAdam method, the optimization objective is
                 # Loss = lambda(t)*Loss_T + (1-lambda(t))*Loss_S
                 # Loss = lambda(t)*Loss_T + (1-lambda(t))*\gamma/2*\sum((\theta_i-\theta_i^*)^2)
-                if group['anneal_w'] > 0.0:
+                if group['anneal_w'] > 0.0 and self.updated:
                     # We calculate the lambda as the annealing function
                     anneal_lambda = anneal_function(group['anneal_fun'], state["step"], group['anneal_k'],
                                                     group['anneal_t0'], group['anneal_w'])

@@ -23,16 +23,17 @@ OUT_DIR=${4:-"$REPO/outputs/"}
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
 LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
-LANGS="ur"
 TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
-MLM_WEIGHT=0.01
-MLM_LANG='ar'
+MLM_WEIGHT=0
+MLM_LANG='zh,ko,ja'
 OPTIM='RecAdam'
-MLM_START=8
+MLM_START=1
+MLM_END=3
 LR=2e-5
 ATTN_T=1
+UPDATE_PRETRAIN=2
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -53,18 +54,19 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
+
+for SEED in 1 2 3 4 5;
+do
 if [ $MLM_WEIGHT == 0 ]; then
-  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_att${ATTN_T}/"
+  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_up${UPDATE_PRETRAIN}_s${SEED}/"
 else
-  #OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_optim${OPTIM}_att${ATTN_T}/"
-  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_optim${OPTIM}/"
+  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_MLME${MLM_END}_optim${OPTIM}_s${SEED}/"
 fi
 
-#OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHs}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_optim${OPTIM}/"
 mkdir -p $OUTPUT_DIR
 #  --do_eval \
-#  --do_train \
 python $REPO/third_party/run_tag.py \
+  --do_train \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -76,7 +78,7 @@ python $REPO/third_party/run_tag.py \
   --per_gpu_train_batch_size $BATCH_SIZE \
   --per_gpu_eval_batch_size 32 \
   --save_steps 1000 \
-  --seed 1 \
+  --seed $SEED \
   --learning_rate $LR \
   --do_predict \
   --predict_langs $LANGS \
@@ -89,6 +91,8 @@ python $REPO/third_party/run_tag.py \
   --mlm_weight $MLM_WEIGHT \
   --mlm_lang $MLM_LANG \
   --mlm_start_epoch $MLM_START \
+  --mlm_end_epoch $MLM_END \
   --attention_t $ATTN_T \
+  --update_pretrained_epoch $UPDATE_PRETRAIN \
   --save_only_best_checkpoint $LC
-
+done
