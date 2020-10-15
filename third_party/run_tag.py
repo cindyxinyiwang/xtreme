@@ -227,10 +227,10 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
               "masked_lm_labels": masked_targets}
         if args.model_type != "distilbert":
           # XLM and RoBERTa don"t use segment_ids
-          inputs["token_type_ids"] = mlm_batch[2] if args.model_type in ["bert", "xlnet"] else None
+          mlm_inputs["token_type_ids"] = mlm_batch[2] if args.model_type in ["bert", "xlnet"] else None
 
         if args.model_type == "xlm":
-          inputs["langs"] = mlm_batch[4]
+          mlm_inputs["langs"] = mlm_batch[4]
 
         mlm_outputs = model.forward_mlm(**mlm_inputs)
         mlm_loss = mlm_outputs[0]
@@ -431,7 +431,7 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
   return results, preds_list
 
 
-def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1):
+def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -635,6 +635,8 @@ def main():
   parser.add_argument("--albert_dropout", default=0.0, type=float,
                       help="The dropout rate for the ALBERT model")
 
+  parser.add_argument("--few_shot_extra_langs", type=str, default=None)
+  parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(

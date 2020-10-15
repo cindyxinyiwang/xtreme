@@ -196,14 +196,20 @@ def train(args, train_dataset, model, tokenizer, lang2id=None):
       model.train()
       batch = tuple(t.to(args.device) for t in batch)
       # get masked LM
-      input_ids, mask_ids = utils.get_masked_lm(batch[0], mask_prob=0.15)
-      inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+      masked_inputs, masked_targets = utils.mask_tokens(batch[0], tokenizer)
+      batch = tuple(t.to(args.device) for t in batch if t is not None)
+      masked_inputs = masked_inputs.to(args.device)
+      masked_targets = masked_targets.to(args.device)
+      inputs = {"input_ids": masked_inputs,
+            "attention_mask": batch[1],
+            "masked_lm_labels": masked_targets}
       if args.model_type != "distilbert":
-        inputs["token_type_ids"] = (
-          batch[2] if args.model_type in ["bert"] else None
-        )  # XLM don't use segment_ids
+        # XLM and RoBERTa don"t use segment_ids
+        inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
+
       if args.model_type == "xlm":
-        inputs["langs"] = batch[4]
+        inputs["langs"] = mlm_batch[4]
+
       outputs = model(**inputs)
       loss = outputs[0]
 

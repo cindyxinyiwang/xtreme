@@ -33,11 +33,13 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data import RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
-from utils_tag import convert_examples_to_features
 from utils_tag import get_labels
 from utils_tag import read_examples_from_file
 from RecAdam import RecAdam, anneal_function
 import utils
+
+from utils_mlm import read_examples_from_file, convert_examples_to_sde_features
+
 
 from transformers import (
   AdamW,
@@ -80,7 +82,7 @@ def set_seed(args):
     torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None, train_dataset_mlm=None):
+def train(args, train_dataset, model, tokenizer, lang2id=None, pretrained_model=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
@@ -88,9 +90,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
   train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-  if train_dataset_mlm is not None:
-    train_mlm_sampler = RandomSampler(train_dataset_mlm) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_mlm_dataloader = DataLoader(train_dataset_mlm, sampler=train_sampler, batch_size=args.train_batch_size)
 
   if args.max_steps > 0:
     t_total = args.max_steps
@@ -177,7 +176,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
-  best_score = 0.0
+  best_score = 10000
   best_checkpoint = None
   patience = 0
   global_step = 0
@@ -186,15 +185,13 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
   set_seed(args) # Add here for reproductibility (even between python 2 and 3)
 
-  if train_dataset_mlm is not None:
-    mlm_iter = iter(train_mlm_dataloader)
   cur_epoch = 0
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
     for step, batch in enumerate(epoch_iterator):
       model.train()
-      masked_inputs, masked_targets = utils.mask_tokens(batch[0], tokenizer)
+      masked_inputs, masked_targets = utils.mask_tokens_sde(batch[0], tokenizer)
       batch = tuple(t.to(args.device) for t in batch if t is not None)
       masked_inputs = masked_inputs.to(args.device)
       masked_targets = masked_targets.to(args.device)
@@ -240,7 +237,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           # Log metrics
           if args.local_rank == -1 and args.evaluate_during_training:
             # Only evaluate on single GPU otherwise metrics may not average well
-            results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.train_langs, lang2id=lang2id)
+            results = evaluate(args, model, tokenizer, mode="dev", lang=args.train_langs, lang2id=lang2id)
             for key, value in results.items():
               tb_writer.add_scalar("eval_{}".format(key), value, global_step)
           tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
@@ -249,10 +246,10 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
         if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
           if args.save_only_best_checkpoint:
-            result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
-            if result["f1"] > best_score:
-              logger.info("result['f1']={} > best_score={}".format(result["f1"], best_score))
-              best_score = result["f1"]
+            result = evaluate(args, model, tokenizer, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
+            if result["f1"] < best_score:
+              logger.info("result['loss']={} < best_score={}".format(result["loss"], best_score))
+              best_score = result["loss"]
               # Save the best model checkpoint
               output_dir = os.path.join(args.output_dir, "checkpoint-best")
               best_checkpoint = output_dir
@@ -299,8 +296,8 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix="", lang="en", lang2id=None, print_result=True):
-  eval_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode=mode, lang=lang, lang2id=lang2id)
+def evaluate(args, model, tokenizer, mode, prefix="", lang="en", lang2id=None, print_result=True):
+  eval_dataset = load_and_cache_examples(args, args.task, tokenizer, mode=mode, lang=lang, lang2id=lang2id)
 
   args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
   # Note that DistributedSampler samples randomly
@@ -317,21 +314,26 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
   logger.info("  Batch size = %d", args.eval_batch_size)
   eval_loss = 0.0
   nb_eval_steps = 0
-  preds = None
   out_label_ids = None
   model.eval()
   for batch in tqdm(eval_dataloader, desc="Evaluating"):
-    batch = tuple(t.to(args.device) for t in batch)
 
     with torch.no_grad():
-      inputs = {"input_ids": batch[0],
+      masked_inputs, masked_targets = utils.mask_tokens_sde(batch[0], tokenizer)
+      batch = tuple(t.to(args.device) for t in batch if t is not None)
+      masked_inputs = masked_inputs.to(args.device)
+      masked_targets = masked_targets.to(args.device)
+      inputs = {"input_ids": masked_inputs,
             "attention_mask": batch[1],
-            "labels": batch[3]}
+            "masked_lm_labels": masked_targets}
+
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
         inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
-      if args.model_type == 'xlm':
+
+      if args.model_type == "xlm":
         inputs["langs"] = batch[4]
+
       outputs = model(**inputs)
       tmp_eval_loss, logits = outputs[:2]
 
@@ -341,35 +343,15 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
 
       eval_loss += tmp_eval_loss.item()
     nb_eval_steps += 1
-    if preds is None:
-      preds = logits.detach().cpu().numpy()
-      out_label_ids = inputs["labels"].detach().cpu().numpy()
-    else:
-      preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
-      out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
+
 
   if nb_eval_steps == 0:
-    results = {k: 0 for k in ["loss", "precision", "recall", "f1"]}
+    results = {k: 0 for k in ["loss"]}
   else:
     eval_loss = eval_loss / nb_eval_steps
-    preds = np.argmax(preds, axis=2)
-
-    label_map = {i: label for i, label in enumerate(labels)}
-
-    out_label_list = [[] for _ in range(out_label_ids.shape[0])]
-    preds_list = [[] for _ in range(out_label_ids.shape[0])]
-
-    for i in range(out_label_ids.shape[0]):
-      for j in range(out_label_ids.shape[1]):
-        if out_label_ids[i, j] != pad_token_label_id:
-          out_label_list[i].append(label_map[out_label_ids[i][j]])
-          preds_list[i].append(label_map[preds[i][j]])
 
     results = {
       "loss": eval_loss,
-      "precision": precision_score(out_label_list, preds_list),
-      "recall": recall_score(out_label_list, preds_list),
-      "f1": f1_score(out_label_list, preds_list)
     }
 
   if print_result:
@@ -377,68 +359,60 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
     for key in sorted(results.keys()):
       logger.info("  %s = %s", key, str(results[key]))
 
-  return results, preds_list
+  return results
 
 
-def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1):
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
+def load_and_cache_examples(args, task, tokenizer, mode='train', lang='en', lang2id=None, evaluate=False, few_shot=None):
+  # Make sure only the first process in distributed training process the 
+  # dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
-    list(filter(None, args.model_name_or_path.split("/"))).pop(),
-    str(args.max_seq_length)))
+  cached_features_file = os.path.join(
+    args.data_dir,
+    "cached_mlm_sde_{}_{}_{}_{}_{}".format(
+      mode,
+      list(filter(None, args.model_name_or_path.split("/"))).pop(),
+      str(args.max_seq_length),
+      str(task),
+      str(lang),
+    ),
+  )
   if os.path.exists(cached_features_file) and not args.overwrite_cache:
     logger.info("Loading features from cached file %s", cached_features_file)
     features = torch.load(cached_features_file)
   else:
-    langs = lang.split(',')
-    logger.info("all languages = {}".format(lang))
-    features = []
-    for lg in langs:
-      data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
-      logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
-      examples = read_examples_from_file(data_file, lg, lang2id)
-      features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
-                          cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                          cls_token=tokenizer.cls_token,
-                          cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                          sep_token=tokenizer.sep_token,
-                          sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
-                          pad_on_left=bool(args.model_type in ["xlnet"]),
-                          pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                          pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-                          pad_token_label_id=pad_token_label_id,
-                          lang=lg
-                          )
-      features.extend(features_lg)
+    examples = []
+    logger.info("Creating features from dataset file at %s", args.data_dir)
+    for lan in lang.split(','):
+      examples.extend(read_examples_from_file(args.data_dir, mode, lan))
+    features = convert_examples_to_sde_features(
+      examples,
+      tokenizer,
+      max_seq_length=args.max_seq_length,
+      pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+      pad_token_segment_id=0,
+    )
     if args.local_rank in [-1, 0]:
-      logger.info("Saving features into cached file {}, len(features)={}".format(cached_features_file, len(features)))
+      logger.info("Saving features into cached file %s", cached_features_file)
       torch.save(features, cached_features_file)
 
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
+  # Make sure only the first process in distributed training process the 
+  # dataset, and the others will use the cache
   if args.local_rank == 0 and not evaluate:
-    torch.distributed.barrier()
-
-  if few_shot > 0 and mode == 'train':
-    logger.info("Original no. of examples = {}".format(len(features)))
-    features = features[: few_shot]
-    logger.info('Using few-shot learning on {} examples'.format(len(features)))
+    torch.distributed.barrier()  
 
   # Convert to Tensors and build dataset
   all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-  all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
-  all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-  all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-  if args.model_type == 'xlm' and features[0].langs is not None:
+  all_attention_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
+  all_token_type_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+
+  if args.model_type == 'xlm':
     all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
-    logger.info('all_langs[0] = {}'.format(all_langs[0]))
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
-  else:
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_langs)
+  else:  
+    dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids)
   return dataset
 
 
@@ -456,7 +430,7 @@ def main():
             help="The output directory where the model predictions and checkpoints will be written.")
 
   ## Other parameters
-  parser.add_argument("--labels", default="", type=str,
+  parser.add_argument("--task", default="", type=str,
             help="Path to a file containing all labels. If not specified, NER/POS labels are used.")
   parser.add_argument("--config_name", default="", type=str,
             help="Pretrained config name or path if not the same as model_name")
@@ -612,13 +586,6 @@ def main():
   # Set seed
   set_seed(args)
 
-  # Prepare NER/POS task
-  labels = get_labels(args.labels)
-  num_labels = len(labels)
-  # Use cross entropy ignore index as padding label id
-  # so that only real label ids contribute to the loss later
-  pad_token_label_id = CrossEntropyLoss().ignore_index
-
   # Load pretrained model and tokenizer
   # Make sure only the first process in distributed training loads model/vocab
   if args.local_rank not in [-1, 0]:
@@ -626,18 +593,21 @@ def main():
 
   args.model_type = args.model_type.lower()
   config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
+  tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
+                        do_lower_case=args.do_lower_case,
+                        cache_dir=args.cache_dir if args.cache_dir else None)
   config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                      num_labels=num_labels,
                       use_sde_embed=args.use_sde_embed,
                       add_sde_embed=args.add_sde_embed,
                       sde_latent=args.sde_latent,
                       mlm_weight=args.mlm_weight,
                       attention_t=args.attention_t,
+                      max_ngram_size=args.max_ngram_size,
+                      cls_token_id=tokenizer.cls_token_id,
+                      sep_token_id=tokenizer.sep_token_id,
+                      unk_token_id=tokenizer.unk_token_id,
+                      pad_token_id=tokenizer.pad_token_id,
                       cache_dir=args.cache_dir if args.cache_dir else None)
-  tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
-                        do_lower_case=args.do_lower_case,
-                        cache_dir=args.cache_dir if args.cache_dir else None)
-
   if args.optimizer == 'RecAdam':
     pretrained_model = model_class.from_pretrained(
             args.model_name_or_path,
@@ -653,8 +623,7 @@ def main():
     logger.info("loading from init_checkpoint={}".format(args.init_checkpoint))
     model = model_class.from_pretrained(args.init_checkpoint,
                                         config=config,
-                                        cache_dir=args.init_checkpoint,
-                                        tokenizer=tokenizer)
+                                        cache_dir=args.init_checkpoint)
   else:
     logger.info("loading from cached model = {}".format(args.model_name_or_path))
     model = model_class.from_pretrained(args.model_name_or_path,
@@ -672,9 +641,8 @@ def main():
 
   # Training
   if args.do_train:
-    train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    train_dataset_mlm = None
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model, train_dataset_mlm=train_dataset_mlm)
+    train_dataset = load_and_cache_examples(args, args.task, tokenizer, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
+    global_step, tr_loss = train(args, train_dataset, model, tokenizer, lang2id, pretrained_model=pretrained_model)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,
@@ -718,7 +686,7 @@ def main():
       global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
       model = model_class.from_pretrained(checkpoint)
       model.to(args.device)
-      result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
+      result = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
       if result["f1"] > best_f1:
         best_checkpoint = checkpoint
         best_f1 = result["f1"]
@@ -731,79 +699,6 @@ def main():
       for key in sorted(results.keys()):
         writer.write("{} = {}\n".format(key, str(results[key])))
       writer.write("best checkpoint = {}, best f1 = {}\n".format(best_checkpoint, best_f1))
-
-  # Prediction
-  if args.do_predict and args.local_rank in [-1, 0]:
-    logger.info("Loading the best checkpoint from {}\n".format(best_checkpoint))
-    tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-    model = model_class.from_pretrained(best_checkpoint)
-    model.to(args.device)
-
-    output_test_results_file = os.path.join(args.output_dir, "test_results.txt")
-    with open(output_test_results_file, "a") as result_writer:
-      for lang in args.predict_langs.split(','):
-        if not os.path.exists(os.path.join(args.data_dir, lang, 'test.{}'.format(args.model_name_or_path))):
-          logger.info("Language {} does not exist".format(lang))
-          continue
-        result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="test", lang=lang, lang2id=lang2id)
-
-        # Save results
-        result_writer.write("=====================\nlanguage={}\n".format(lang))
-        for key in sorted(result.keys()):
-          result_writer.write("{} = {}\n".format(key, str(result[key])))
-        # Save predictions
-        output_test_predictions_file = os.path.join(args.output_dir, "test_{}_predictions.txt".format(lang))
-        infile = os.path.join(args.data_dir, lang, "test.{}".format(args.model_name_or_path))
-        idxfile = infile + '.idx'
-        save_predictions(args, predictions, output_test_predictions_file, infile, idxfile)
-
-  # Predict dev set
-  if args.do_predict_dev and args.local_rank in [-1, 0]:
-    logger.info("Loading the best checkpoint from {}\n".format(best_checkpoint))
-    tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-    model = model_class.from_pretrained(best_checkpoint)
-    model.to(args.device)
-
-    output_test_results_file = os.path.join(args.output_dir, "dev_results.txt")
-    with open(output_test_results_file, "w") as result_writer:
-      for lang in args.predict_langs.split(','):
-        if not os.path.exists(os.path.join(args.data_dir, lang, 'dev.{}'.format(args.model_name_or_path))):
-          logger.info("Language {} does not exist".format(lang))
-          continue
-        result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=lang, lang2id=lang2id)
-
-        # Save results
-        result_writer.write("=====================\nlanguage={}\n".format(lang))
-        for key in sorted(result.keys()):
-          result_writer.write("{} = {}\n".format(key, str(result[key])))
-        # Save predictions
-        output_test_predictions_file = os.path.join(args.output_dir, "dev_{}_predictions.txt".format(lang))
-        infile = os.path.join(args.data_dir, lang, "dev.{}".format(args.model_name_or_path))
-        idxfile = infile + '.idx'
-        save_predictions(args, predictions, output_test_predictions_file, infile, idxfile)
-
-def save_predictions(args, predictions, output_file, text_file, idx_file, output_word_prediction=False):
-  # Save predictions
-  with open(text_file, "r") as text_reader, open(idx_file, "r") as idx_reader:
-    text = text_reader.readlines()
-    index = idx_reader.readlines()
-    assert len(text) == len(index)
-
-  # Sanity check on the predictions
-  with open(output_file, "w") as writer:
-    example_id = 0
-    prev_id = int(index[0])
-    for line, idx in zip(text, index):
-      if line == "" or line == "\n":
-        example_id += 1
-      else:
-        cur_id = int(idx)
-        output_line = '\n' if cur_id != prev_id else ''
-        if output_word_prediction:
-          output_line += line.split()[0] + '\t'
-        output_line += predictions[example_id].pop(0) + '\n'
-        writer.write(output_line)
-        prev_id = cur_id
 
 if __name__ == "__main__":
   main()

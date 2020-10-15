@@ -23,12 +23,16 @@ OUT_DIR=${4:-"$REPO/outputs/"}
 export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
 #LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
-LANGS="it,fr,pt,es"
+LANGS="de,fr,en,pt,es"
 TRAIN_LANGS="en"
-NUM_EPOCHS=20
+NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
-SDE_LATENT=0
+BPE_SEG=1
+SDE_LATENT=5000
+MAX_NGRAM=30
+INIT_CKPT=/home/xinyiw/xtreme/outputs//panx/sde_lat5000_ngram30_pretrain_bert-base-multilingual-cased-LR2e-4-epoch-MaxLen128/checkpoint-best/
+
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -49,10 +53,13 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
-OUTPUT_DIR="$OUT_DIR/$TASK/sde_lat${SDE_LATENT}_${MODEL}-LR${LR}-epoch${NUM_EPOCH}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/sde_lat${SDE_LATENT}_bpe${BPE_SEG}_${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_fs100/"
 mkdir -p $OUTPUT_DIR
-#  --do_eval \
-python $REPO/third_party/run_tag.py \
+python $REPO/third_party/run_sde_tag.py \
+  --do_eval \
+  --init_checkpoint $INIT_CKPT \
+  --overwrite_output_dir \
+  --do_train \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -66,16 +73,15 @@ python $REPO/third_party/run_tag.py \
   --save_steps 1000 \
   --seed 1 \
   --learning_rate $LR \
-  --do_train \
   --do_predict \
-  --overwrite_output_dir \
   --predict_langs $LANGS \
   --train_langs $TRAIN_LANGS \
   --log_file $OUTPUT_DIR/train.log \
   --eval_all_checkpoints \
   --eval_patience -1 \
   --sde_latent $SDE_LATENT \
-  --use_sde_embed \
-  --init_checkpoint /home/xinyiw/xtreme/outputs//panx/sde_lat0_ngram30_pretrain_bert-base-multilingual-cased-LR2e-4-epoch-MaxLen64/checkpoint-best \
+  --max_ngram_size $MAX_NGRAM \
+  --few_shot 100 \
+  --bpe_segment $BPE_SEG \
   --save_only_best_checkpoint $LC
 

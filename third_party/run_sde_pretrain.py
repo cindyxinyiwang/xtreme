@@ -147,7 +147,7 @@ def train(args, train_dataset, sde_model, model, tokenizer, labels, pad_token_la
       input_ids = batch[0]
       labels = batch[3]
       subword_embedding = model.bert.embeddings.word_embeddings(labels)
-      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(labels) 
+      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(input_ids) 
       mse_loss = torch.nn.MSELoss(reduction='none')
       loss = mse_loss(sde_embedding, subword_embedding)
       num_words = labels.numel()
@@ -268,7 +268,7 @@ def evaluate(args, sde_model, model, tokenizer, labels, pad_token_label_id, mode
     with torch.no_grad():
       input_ids = batch[0]
       labels = batch[3]
-      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(labels) 
+      sde_embedding = sde_model.bert.embeddings.sde_word_embeddings(input_ids) 
       subword_embedding = model.bert.embeddings.word_embeddings(labels)
       mse_loss = torch.nn.MSELoss(reduction='none')
       loss = mse_loss(sde_embedding, subword_embedding)
@@ -515,8 +515,7 @@ def main():
                                         cache_dir=args.init_checkpoint)
     sde_model = sde_model_class.from_pretrained(args.init_checkpoint,
                                         config=sde_config,
-                                        cache_dir=args.init_checkpoint,
-                                        tokenizer=tokenizer)
+                                        cache_dir=args.init_checkpoint)
   else:
     logger.info("loading from cached model = {}".format(args.model_name_or_path))
     model = model_class.from_pretrained(args.model_name_or_path,
@@ -526,8 +525,7 @@ def main():
     sde_model = sde_model_class.from_pretrained(args.model_name_or_path,
                       from_tf=bool(".ckpt" in args.model_name_or_path),
                       config=sde_config,
-                      cache_dir=args.cache_dir if args.cache_dir else None,
-                      tokenizer=tokenizer)
+                      cache_dir=args.cache_dir if args.cache_dir else None)
 
   lang2id = config.lang2id if args.model_type == "xlm" else None
   logger.info("Using lang2id = {}".format(lang2id))
