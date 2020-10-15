@@ -438,9 +438,16 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
-    list(filter(None, args.model_name_or_path.split("/"))).pop(),
-    str(args.max_seq_length)))
+  bpe_dropout = args.bpe_dropout
+  if mode != 'train': bpe_dropout = 0
+  if bpe_dropout > 0:
+    cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}_drop{}".format(mode, lang,
+      list(filter(None, args.model_name_or_path.split("/"))).pop(),
+      str(args.max_seq_length), bpe_dropout))
+  else:
+    cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
+      list(filter(None, args.model_name_or_path.split("/"))).pop(),
+      str(args.max_seq_length)))
   if os.path.exists(cached_features_file) and not args.overwrite_cache:
     logger.info("Loading features from cached file %s", cached_features_file)
     features = torch.load(cached_features_file)
@@ -462,7 +469,8 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
                           pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
                           pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
                           pad_token_label_id=pad_token_label_id,
-                          lang=lg
+                          lang=lg,
+                          bpe_dropout=bpe_dropout,
                           )
       features.extend(features_lg)
     if args.local_rank in [-1, 0]:
@@ -606,6 +614,7 @@ def main():
 
 
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
+  parser.add_argument("--bpe_dropout", default=0, type=float)
   # RecAdam parameters
   parser.add_argument("--optimizer", type=str, default="RecAdam", choices=["Adam", "RecAdam"],
                       help="Choose the optimizer to use. Default RecAdam.")

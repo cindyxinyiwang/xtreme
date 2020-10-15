@@ -334,7 +334,8 @@ def convert_examples_to_features(examples,
                  pad_token_label_id=-1,
                  sequence_a_segment_id=0,
                  mask_padding_with_zero=True,
-                 lang='en'):
+                 lang='en',
+                 bpe_dropout=0):
   """ Loads a data file into a list of `InputBatch`s
     `cls_token_at_end` define the location of the CLS token:
       - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -355,7 +356,7 @@ def convert_examples_to_features(examples,
       if isinstance(tokenizer, XLMTokenizer):
         word_tokens = tokenizer.tokenize(word, lang=lang)
       else:
-        word_tokens = tokenizer.tokenize(word)
+        word_tokens = tokenizer.tokenize(word, dropout=bpe_dropout)
       if len(word) != 0 and len(word_tokens) == 0:
         word_tokens = [tokenizer.unk_token]
       tokens.extend(word_tokens)
