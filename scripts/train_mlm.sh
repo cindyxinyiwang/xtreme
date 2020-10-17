@@ -21,18 +21,22 @@ DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 export CUDA_VISIBLE_DEVICES=$GPU
-TASK='panx'
+TASK='xnli'
 #LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
-LANGS="de,fr,en,pt,es"
+LANGS="en,fr"
 TRAIN_LANGS="en,fr"
-NUM_EPOCHS=10
+
 MAX_LENGTH=128
+OPTIM='Adam'
 LR=2e-5
+ATTN_T=1
 BPE_SEG=1
 SDE_LATENT=5000
 MAX_NGRAM=30
-#INIT_CKPT=/home/xinyiw/xtreme/outputs//panx/sde_lat5000_ngram30_pretrain_bert-base-multilingual-cased-LR2e-4-epoch-MaxLen128/checkpoint-best/
-INIT_CKPT=/home/xinyiw/xtreme/outputs//MLM/mlm_sde_bert-base-multilingual-cased-LR2e-5-step10000-MaxLen128-TrainLangen,fr_optimAdam/checkpoint-2000/
+INIT_CKPT=/home/xinyiw/xtreme/outputs//panx/sde_lat5000_ngram30_pretrain_bert-base-multilingual-cased-LR2e-4-epoch-MaxLen128/checkpoint-best/
+
+MS=10000
+SS=2000
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -48,39 +52,45 @@ if [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-roberta-large" ]; then
   BATCH_SIZE=2
   GRAD_ACC=16
 else
-  BATCH_SIZE=2
-  GRAD_ACC=16
+  BATCH_SIZE=8
+  GRAD_ACC=4
 fi
 
-DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
-OUTPUT_DIR="$OUT_DIR/$TASK/sde_lat${SDE_LATENT}_bpe${BPE_SEG}_${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}/"
+#DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
+DATA_DIR=$DATA_DIR/${TASK}/
+
+OUTPUT_DIR="$OUT_DIR/MLM/mlm_sde_${MODEL}-LR${LR}-step${MS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}/"
+
 mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_sde_tag.py \
-  --do_eval \
-  --init_checkpoint $INIT_CKPT \
-  --overwrite_output_dir \
+#  --do_eval \
+#  --do_predict \
+python $REPO/third_party/run_mlm.py \
   --do_train \
+  --use_sde_embed \
+  --bpe_segment $BPE_SEG\
+  --max_ngram_size ${MAX_NGRAM} \
+  --sde_latent $SDE_LATENT \
+  --task $TASK \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
-  --labels $DATA_DIR/labels.txt \
   --model_name_or_path $MODEL \
   --output_dir $OUTPUT_DIR \
   --max_seq_length  $MAX_LENGTH \
-  --num_train_epochs $NUM_EPOCHS \
   --gradient_accumulation_steps $GRAD_ACC \
   --per_gpu_train_batch_size $BATCH_SIZE \
   --per_gpu_eval_batch_size 32 \
-  --save_steps 1000 \
   --seed 1 \
   --learning_rate $LR \
-  --do_predict \
   --predict_langs $LANGS \
   --train_langs $TRAIN_LANGS \
   --log_file $OUTPUT_DIR/train.log \
   --eval_all_checkpoints \
   --eval_patience -1 \
-  --sde_latent $SDE_LATENT \
-  --max_ngram_size $MAX_NGRAM \
-  --bpe_segment $BPE_SEG \
-  --save_only_best_checkpoint $LC
+  --overwrite_output_dir \
+  --optimizer $OPTIM \
+  --attention_t $ATTN_T \
+  --num_train_epochs 1 \
+  --max_steps $MS \
+  --init_checkpoint $INIT_CKPT \
+  --save_steps $SS
 

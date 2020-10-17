@@ -26,14 +26,14 @@ LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,e
 TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
-MLM_WEIGHT=0
+MLM_WEIGHT=0.001
 MLM_LANG='zh,ko,ja'
-OPTIM='RecAdam'
-MLM_START=1
-MLM_END=3
+OPTIM='Adam'
+MLM_START=5
+MLM_END=10
 LR=2e-5
 ATTN_T=1
-UPDATE_PRETRAIN=2
+UPDATE_PRETRAIN=0
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -55,7 +55,7 @@ fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-for SEED in 1 2 3 4 5;
+for SEED in 1;
 do
 if [ $MLM_WEIGHT == 0 ]; then
   OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_up${UPDATE_PRETRAIN}_s${SEED}/"
@@ -64,9 +64,9 @@ else
 fi
 
 mkdir -p $OUTPUT_DIR
-#  --do_eval \
 python $REPO/third_party/run_tag.py \
   --do_train \
+  --do_eval \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \

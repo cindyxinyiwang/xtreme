@@ -66,7 +66,6 @@ ALL_MODELS = sum(
 
 MODEL_CLASSES = {
   "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
-  "bert_mlm": (BertConfig, BertForMLMandTokenClassification, BertTokenizer),
   "xlm": (XLMConfig, XLMForTokenClassification, XLMTokenizer),
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
@@ -80,7 +79,7 @@ def set_seed(args):
     torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None, train_dataset_mlm=None):
+def train(args, train_dataset, st_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
@@ -88,9 +87,9 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
   train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-  if train_dataset_mlm is not None:
-    train_mlm_sampler = RandomSampler(train_dataset_mlm) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_mlm_dataloader = DataLoader(train_dataset_mlm, sampler=train_sampler, batch_size=args.train_batch_size)
+
+  st_train_sampler = RandomSampler(st_train_dataset) if args.local_rank == -1 else DistributedSampler(st_train_dataset)
+  st_train_dataloader = DataLoader(st_train_dataset, sampler=st_train_sampler, batch_size=args.train_batch_size)
 
   if args.max_steps > 0:
     t_total = args.max_steps
@@ -186,8 +185,8 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
   set_seed(args) # Add here for reproductibility (even between python 2 and 3)
 
-  if train_dataset_mlm is not None:
-    mlm_iter = iter(train_mlm_dataloader)
+  model_params = [(n, p) for n,p in model.named_parameters() if p.requires_grad and 'bert.pooler' not in n]
+  st_iter = iter(st_train_dataloader)
   cur_epoch = 0
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
@@ -212,29 +211,44 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
       outputs = model(**inputs)
       loss = outputs[0]
-      if train_dataset_mlm is not None and cur_epoch >= args.mlm_start_epoch and cur_epoch <= args.mlm_end_epoch:
-        try:
-          mlm_batch = next(mlm_iter)
-        except:
-          mlm_iter = iter(train_mlm_dataloader)
-          mlm_batch = next(mlm_iter)
-        masked_inputs, masked_targets = utils.mask_tokens(mlm_batch[0], tokenizer)
-        mlm_batch = tuple(t.to(args.device) for t in batch if t is not None)
-        masked_inputs = masked_inputs.to(args.device)
-        masked_targets = masked_targets.to(args.device)
-        mlm_inputs = {"input_ids": masked_inputs,
-              "attention_mask": mlm_batch[1],
-              "masked_lm_labels": masked_targets}
-        if args.model_type != "distilbert":
-          # XLM and RoBERTa don"t use segment_ids
-          mlm_inputs["token_type_ids"] = mlm_batch[2] if args.model_type in ["bert", "xlnet"] else None
 
-        if args.model_type == "xlm":
-          mlm_inputs["langs"] = mlm_batch[4]
 
-        mlm_outputs = model.forward_mlm(**mlm_inputs)
-        mlm_loss = mlm_outputs[0]
-        loss = loss + args.mlm_weight*mlm_loss
+      try:
+        st_batch = next(st_iter)
+      except:
+        st_iter = iter(st_train_dataloader)
+        st_batch = next(st_iter)
+      st_batch = tuple(t.to(args.device) for t in st_batch)
+      if args.self_teach:
+        pred_labels, gold_labels, logits = decode_batch(args, st_batch, model, tokenizer, labels, pad_token_label_id)
+      else:
+        pred_labels, gold_labels, logits = decode_batch(args, st_batch, pretrained_model, tokenizer, labels, pad_token_label_id)
+      st_inputs = {"input_ids": st_batch[0], "attention_mask": st_batch[1], "labels": pred_labels}
+
+      if args.gl_mask:
+        clean_grad = torch.autograd.grad(loss, [p for n, p in model_params], allow_unused=True, only_inputs=True)
+        st_inputs['reduction'] = 'none'
+        st_outputs = model(**st_inputs)
+        st_loss = st_outputs[0]
+        kept_label_mask = st_outputs[-1]
+        z = torch.ones_like(st_loss).requires_grad_(True)
+        st_grad = torch.autograd.grad(st_loss, [p for n, p in model_params], grad_outputs=z, allow_unused=True, retain_graph=True, create_graph=True, only_inputs=True)
+        dot_prod = torch.autograd.grad(st_grad, z, grad_outputs=clean_grad, only_inputs=True)[0]
+        grad_mask = (dot_prod >= 0)
+        kept_label_mask = (grad_mask & kept_label_mask)
+        st_loss = st_loss[kept_label_mask].sum() / kept_label_mask.int().sum()
+
+        outputs = model(**inputs)
+        loss = outputs[0]
+        #st_inputs['extra_mask'] = grad_mask
+        #st_inputs['reduction'] = 'mean'
+        #st_outputs = model(**st_inputs)
+        #st_loss = st_outputs[0]
+      else:
+        st_outputs = model(**st_inputs)
+        st_loss = st_outputs[0]
+
+      loss = loss + st_loss
 
       if args.n_gpu > 1:
         # mean() to average on multi-gpu parallel training
@@ -247,33 +261,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           scaled_loss.backward()
       else:
         loss.backward()
-
-      if args.tau > 0:
-          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
-          inputs = {"input_ids": input_ids,
-                "attention_mask": batch[1],
-                "labels": batch[3]}
-
-          if args.model_type != "distilbert":
-            # XLM and RoBERTa don"t use segment_ids
-            inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
-
-          if args.model_type == "xlm":
-            inputs["langs"] = batch[4]
-
-          outputs = model(**inputs)
-          aug_loss = outputs[0]
-
-          if args.n_gpu > 1:
-            # mean() to average on multi-gpu parallel training
-            aug_loss = aug_loss.mean()
-          if args.gradient_accumulation_steps > 1:
-            aug_loss = aug_loss / args.gradient_accumulation_steps
-          if args.fp16:
-            with amp.scale_loss(aug_lossloss, optimizer) as scaled_loss:
-              scaled_loss.backward()
-          else:
-            aug_loss.backward()
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -348,6 +335,26 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
     tb_writer.close()
 
   return global_step, tr_loss / global_step
+
+
+def decode_batch(args, batch, model, tokenizer, labels, pad_token_label_id):
+
+    #with torch.no_grad():
+    inputs = {"input_ids": batch[0],
+          "attention_mask": batch[1],
+          "labels": batch[3]}
+    if args.model_type != "distilbert":
+      # XLM and RoBERTa don"t use segment_ids
+      inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
+    if args.model_type == 'xlm':
+      inputs["langs"] = batch[4]
+    outputs = model(**inputs)
+    tmp_eval_loss, logits = outputs[:2]
+
+    pred_labels = torch.argmax(logits, dim=2)
+    gold_labels = inputs["labels"]
+    pred_labels[gold_labels.eq(pad_token_label_id)] = pad_token_label_id
+    return pred_labels.detach(), gold_labels, logits.detach()
 
 
 def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix="", lang="en", lang2id=None, print_result=True):
@@ -431,7 +438,7 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
   return results, preds_list
 
 
-def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -537,6 +544,8 @@ def main():
   parser.add_argument("--do_predict_train", action="store_true")
   parser.add_argument("--init_checkpoint", default=None, type=str,
             help="initial checkpoint for train/predict")
+  parser.add_argument("--pretrained_checkpoint", default=None, type=str,
+            help="pretrained checkpoint for self train")
   parser.add_argument("--evaluate_during_training", action="store_true",
             help="Whether to run evaluation during training at each logging step.")
   parser.add_argument("--do_lower_case", action="store_true",
@@ -594,6 +603,7 @@ def main():
   parser.add_argument("--predict_langs", type=str, default="en", help="prediction languages")
   parser.add_argument("--train_langs", default="en", type=str,
             help="The languages in the training sets.")
+  parser.add_argument("--st_train_langs", default="en", type=str)
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--eval_patience", type=int, default=-1, help="wait N times of decreasing dev score before early stop during training")
 
@@ -636,8 +646,9 @@ def main():
   parser.add_argument("--albert_dropout", default=0.0, type=float,
                       help="The dropout rate for the ALBERT model")
 
-  parser.add_argument("--few_shot_extra_langs", type=str, default=None)
-  parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
+  parser.add_argument("--few_shot_st", type=int, default="-1")
+  parser.add_argument("--gl_mask", action="store_true")
+  parser.add_argument("--self_teach", action="store_true")
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -707,16 +718,13 @@ def main():
                         do_lower_case=args.do_lower_case,
                         cache_dir=args.cache_dir if args.cache_dir else None)
 
-  if args.optimizer == 'RecAdam':
-    pretrained_model = model_class.from_pretrained(
-            args.model_name_or_path,
-            from_tf=bool(".ckpt" in args.model_name_or_path),
-            config=config,
-            cache_dir=args.cache_dir if args.cache_dir else None,
-        )
-    pretrained_model.to(args.device)
-  else:
-    pretrained_model = None
+  logger.info("loading from pretrained_checkpoint={}".format(args.pretrained_checkpoint))
+  pretrained_model = model_class.from_pretrained(
+          args.pretrained_checkpoint,
+          config=config,
+          cache_dir=args.pretrained_checkpoint,
+      )
+  pretrained_model.to(args.device)
 
   if args.init_checkpoint:
     logger.info("loading from init_checkpoint={}".format(args.init_checkpoint))
@@ -741,11 +749,8 @@ def main():
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    if args.mlm_weight > 0:
-      train_dataset_mlm = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.mlm_lang, lang2id=lang2id, few_shot=args.few_shot)
-    else:
-      train_dataset_mlm = None
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model, train_dataset_mlm=train_dataset_mlm)
+    st_train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.st_train_langs, lang2id=lang2id, few_shot=args.few_shot_st)
+    global_step, tr_loss = train(args, train_dataset, st_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,
