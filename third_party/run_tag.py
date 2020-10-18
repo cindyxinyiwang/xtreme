@@ -616,6 +616,7 @@ def main():
 
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--bpe_dropout", default=0, type=float)
+  parser.add_argument("--fix_class", action='store_true')
   # RecAdam parameters
   parser.add_argument("--optimizer", type=str, default="RecAdam", choices=["Adam", "RecAdam"],
                       help="Choose the optimizer to use. Default RecAdam.")
@@ -702,6 +703,7 @@ def main():
                       sde_latent=args.sde_latent,
                       mlm_weight=args.mlm_weight,
                       attention_t=args.attention_t,
+                      fix_class=args.fix_class,
                       cache_dir=args.cache_dir if args.cache_dir else None)
   tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                         do_lower_case=args.do_lower_case,
