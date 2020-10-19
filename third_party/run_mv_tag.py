@@ -245,6 +245,10 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1) 
         dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits[dropped_kept_label_mask], dim=1)
+        if len(prob) > len(dropped_log_prob):
+          prob = prob[:len(dropped_log_prob)]
+        elif len(prob) < len(dropped_log_prob):
+          dropped_log_prob = dropped_log_prob[:len(prob)]
         kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
         kl = kl_loss(dropped_log_prob, prob)
         loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl
