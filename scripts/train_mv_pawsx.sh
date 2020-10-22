@@ -32,7 +32,13 @@ LR=2e-5
 EPOCH=5
 MAXL=128
 LANGS="de,en,es,fr,ja,ko,zh"
-BPE_DROP=0.1
+BPE_DROP=0.2
+KL=0.2 
+KL_T=1
+KL_TB=0
+KL_TG=0
+KL_SG=0
+
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -53,10 +59,10 @@ fi
 
 for SEED in 1 2 3 4 5;
 do
-SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_bped${BPE_DROP}_s${SEED}/"
+SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_kltb${KL_TB}_kltg${KL_TG}_klsg${KL_SG}_s${SEED}/"
 mkdir -p $SAVE_DIR
 
-python $PWD/third_party/run_classify.py \
+python $PWD/third_party/run_mv_classify.py \
   --model_type $MODEL_TYPE \
   --model_name_or_path $MODEL \
   --train_language en \
@@ -81,5 +87,10 @@ python $PWD/third_party/run_classify.py \
   --save_only_best_checkpoint $LC \
   --seed $SEED \
   --bpe_dropout $BPE_DROP \
+  --kl_weight $KL \
+  --kl_t $KL_T \
+  --kl_t_scale_both $KL_TB \
+  --kl_t_scale_grad $KL_TG \
+  --kl_stop_grad $KL_SG \
   --eval_test_set 
 done

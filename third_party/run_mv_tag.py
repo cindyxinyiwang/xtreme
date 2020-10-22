@@ -243,15 +243,25 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       dropped_logits = dropped_outputs[-1]
 
       if args.kl_weight > 0:
-        prob = torch.nn.functional.softmax(logits[kept_label_mask], dim=1) 
-        dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits[dropped_kept_label_mask], dim=1)
+        prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
+        if args.kl_stop_grad:
+          prob = prob.detach()
+        if args.kl_t_scale_both:
+          kl_t = args.kl_t
+        else: 
+          kl_t = 1
+        if args.kl_t_scale_grad:
+          kl_loss_scale = kl_t * args.kl_t
+        else:
+          kl_loss_scale = 1
+        dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits[dropped_kept_label_mask]/kl_t, dim=1)
         if len(prob) > len(dropped_log_prob):
           prob = prob[:len(dropped_log_prob)]
         elif len(prob) < len(dropped_log_prob):
           dropped_log_prob = dropped_log_prob[:len(prob)]
         kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
         kl = kl_loss(dropped_log_prob, prob)
-        loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl
+        loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl*kl_loss_scale
       else:
         loss = 0.5*loss + 0.5*dropped_loss
       if args.n_gpu > 1:
@@ -601,7 +611,11 @@ def main():
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--bpe_dropout", default=0, type=float)
   parser.add_argument("--kl_weight", default=0, type=float)
+  parser.add_argument("--kl_t", default=1, type=float)
   parser.add_argument("--fix_class", action='store_true')
+  parser.add_argument("--kl_t_scale_both", default=0, type=int, help="1 if scale both logits by t")
+  parser.add_argument("--kl_t_scale_grad", default=0, type=int, help="1 if multiply kl loss by t square")
+  parser.add_argument("--kl_stop_grad", default=0, type=int, help="1 if stop gradient to target")
   # RecAdam parameters
   parser.add_argument("--optimizer", type=str, default="RecAdam", choices=["Adam", "RecAdam"],
                       help="Choose the optimizer to use. Default RecAdam.")

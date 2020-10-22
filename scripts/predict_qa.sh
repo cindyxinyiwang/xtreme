@@ -56,13 +56,16 @@ for lang in ${langs[@]}; do
     TEST_FILE=${DIR}/tydiqa-goldp-v1.1-dev/tydiqa.$lang.dev.json
   fi
 
-  CUDA_VISIBLE_DEVICES=${GPU} python third_party/run_squad.py \
+  #CUDA_VISIBLE_DEVICES=${GPU} python third_party/run_squad.py \
+  python third_party/run_squad.py \
     --model_type ${MODEL_TYPE} \
     --model_name_or_path ${MODEL_PATH} \
     --do_eval \
     --do_lower_case \
     --eval_lang ${lang} \
     --predict_file "${TEST_FILE}" \
-    --output_dir "${PRED_DIR}" &> /dev/null
+    --log_file ${MODEL_PATH}/train.log \
+    --output_dir "${PRED_DIR}"
+    #--output_dir "${PRED_DIR}" &> /dev/null
 done
 

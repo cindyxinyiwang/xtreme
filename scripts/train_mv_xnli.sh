@@ -18,21 +18,28 @@
 #SBATCH --time=0
 #SBATCH --mem=15GB
 
-
 REPO=$PWD
-MODEL=${1:-bert-base-multilingual-cased}
-GPU=${2:-0}
+GPU=${1:-0}
+MODEL=${2:-bert-base-multilingual-cased}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 #export CUDA_VISIBLE_DEVICES=$GPU
 
-TASK='pawsx'
+TASK='xnli'
 LR=2e-5
 EPOCH=5
 MAXL=128
-LANGS="de,en,es,fr,ja,ko,zh"
-BPE_DROP=0.1
+TRAIN_LANG="en"
+LANGS="ar,bg,de,el,en,es,fr,hi,ru,sw,th,tr,ur,vi,zh"
+BPE_DROP=0.2
+KL=0.2 
+KL_T=1
+KL_TB=0
+KL_TG=0
+KL_SG=0
+
+
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -53,33 +60,36 @@ fi
 
 for SEED in 1 2 3 4 5;
 do
-SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_bped${BPE_DROP}_s${SEED}/"
+SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_kltb${KL_TB}_kltg${KL_TG}_klsg${KL_SG}_s${SEED}/"
 mkdir -p $SAVE_DIR
 
-python $PWD/third_party/run_classify.py \
+python $PWD/third_party/run_mv_classify.py \
   --model_type $MODEL_TYPE \
   --model_name_or_path $MODEL \
-  --train_language en \
+  --train_language $TRAIN_LANG \
   --task_name $TASK \
   --do_train \
   --do_eval \
   --do_predict \
-  --train_split train \
-  --test_split test \
-  --data_dir $DATA_DIR/$TASK/ \
+  --data_dir $DATA_DIR/${TASK} \
   --gradient_accumulation_steps $GRAD_ACC \
-  --save_steps 200 \
   --per_gpu_train_batch_size $BATCH_SIZE \
   --learning_rate $LR \
   --num_train_epochs $EPOCH \
   --max_seq_length $MAXL \
-  --output_dir $SAVE_DIR \
+  --output_dir $SAVE_DIR/ \
+  --save_steps 100 \
   --eval_all_checkpoints \
-  --overwrite_output_dir \
-  --log_file 'train.log' \
+  --log_file 'train' \
   --predict_languages $LANGS \
-  --save_only_best_checkpoint $LC \
+  --save_only_best_checkpoint \
+  --overwrite_output_dir \
   --seed $SEED \
   --bpe_dropout $BPE_DROP \
-  --eval_test_set 
+  --kl_weight $KL \
+  --kl_t $KL_T \
+  --kl_t_scale_both $KL_TB \
+  --kl_t_scale_grad $KL_TG \
+  --kl_stop_grad $KL_SG \
+  --eval_test_set $LC
 done

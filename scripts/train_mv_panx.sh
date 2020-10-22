@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=0
+#SBATCH --mem=15GB
+
 REPO=$PWD
 GPU=${1:-0}
-MODEL=${2:-bert-base-multilingual-cased}
-#MODEL=${2:-xlm-roberta-base}
+#MODEL=${2:-bert-base-multilingual-cased}
+MODEL=${2:-xlm-roberta-base}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
@@ -29,7 +34,7 @@ MAX_LENGTH=128
 OPTIM='Adam'
 LR=2e-5
 BPE_DROP=0.1
-KL=0.1 
+KL=0.2 
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -51,7 +56,7 @@ fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-for SEED in 1;
+for SEED in 1 2 3 4 5;
 do
 OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_mbped${BPE_DROP}_kl${KL}_s${SEED}/"
 

@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=0
+#SBATCH --mem=15GB
+
 REPO=$PWD
 MODEL=${1:-bert-base-multilingual-cased}
 GPU=${2:-0}
@@ -20,11 +25,13 @@ DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 TASK='udpos'
-export CUDA_VISIBLE_DEVICES=$GPU
+#export CUDA_VISIBLE_DEVICES=$GPU
 LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
+TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
+BPE_DROP=0.8
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -45,9 +52,14 @@ else
 fi
 
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}/"
+#for SEED in 1;
+for SEED in 1 2 3 4 5;
+do
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_bped${BPE_DROP}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
-python3 $REPO/third_party/run_tag.py \
+python $REPO/third_party/run_tag.py \
+  --do_train \
+  --do_eval \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -58,15 +70,14 @@ python3 $REPO/third_party/run_tag.py \
   --gradient_accumulation_steps $GRAD_ACC \
   --per_gpu_train_batch_size $BATCH_SIZE \
   --save_steps 500 \
-  --seed 1 \
+  --seed $SEED \
   --learning_rate $LR \
-  --do_train \
-  --do_eval \
   --do_predict \
-  --do_predict_dev \
-  --evaluate_during_training \
   --predict_langs $LANGS \
   --log_file $OUTPUT_DIR/train.log \
   --eval_all_checkpoints \
   --overwrite_output_dir \
+  --train_langs $TRAIN_LANGS \
+  --bpe_dropout $BPE_DROP \
   --save_only_best_checkpoint $LC
+done

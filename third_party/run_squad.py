@@ -427,17 +427,30 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
     # Make sure only the first process in distributed training process the dataset, and the others will use the cache
     torch.distributed.barrier()
 
+  bpe_dropout = args.bpe_dropout if not evaluate else 0
   # Load data features from cache or dataset file
   input_dir = args.data_dir if args.data_dir else "."
-  cached_features_file = os.path.join(
-    input_dir,
-    "cached_{}_{}_{}_{}".format(
-      "dev" if evaluate else "train",
-      list(filter(None, args.model_name_or_path.split("/"))).pop(),
-      str(args.max_seq_length),
-      str(language)
-    ),
-  )
+  if bpe_dropout > 0:
+    cached_features_file = os.path.join(
+      input_dir,
+      "cached_{}_{}_{}_{}_bped{}".format(
+        "dev" if evaluate else "train",
+        list(filter(None, args.model_name_or_path.split("/"))).pop(),
+        str(args.max_seq_length),
+        str(language),
+        str(bpe_dropout)
+      ),
+    )
+  else:
+    cached_features_file = os.path.join(
+      input_dir,
+      "cached_{}_{}_{}_{}".format(
+        "dev" if evaluate else "train",
+        list(filter(None, args.model_name_or_path.split("/"))).pop(),
+        str(args.max_seq_length),
+        str(language)
+      ),
+    )
 
   # Init features and dataset from cache if it exists
   if os.path.exists(cached_features_file) and not args.overwrite_cache and not output_examples:
@@ -474,7 +487,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
       is_training=not evaluate,
       return_dataset="pt",
       threads=args.threads,
-      lang2id=lang2id
+      lang2id=lang2id,
+      bpe_dropout=bpe_dropout
     )
 
     if args.local_rank in [-1, 0]:
@@ -676,6 +690,8 @@ def main():
   parser.add_argument("--train_lang", type=str, default="en", help="The language of the training data")
   parser.add_argument("--eval_lang", type=str, default="en", help="The language of the test data")
 
+  parser.add_argument("--log_file", type=str, default=None, help="log file")
+  parser.add_argument("--bpe_dropout", type=float, default=0, help="wait N times of decreasing dev score before early stop during training")
   args = parser.parse_args()
 
   if (
@@ -711,11 +727,12 @@ def main():
   args.device = device
 
   # Setup logging
-  logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-    datefmt="%m/%d/%Y %H:%M:%S",
-    level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN,
-  )
+  logging.basicConfig(handlers = [logging.FileHandler(args.log_file), logging.StreamHandler()],
+                      format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
+                      datefmt = '%m/%d/%Y %H:%M:%S',
+                      level = logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
+
+  logging.info("Input args: %r" % args)
   logger.warning(
     "Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
     args.local_rank,

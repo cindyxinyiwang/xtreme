@@ -43,7 +43,7 @@ function download_xnli {
 # download PAWS-X dataset
 function download_pawsx {
     cd $DIR
-    wget https://storage.googleapis.com/paws/pawsx/x-final.tar.gz -q --show-progress
+    wget https://storage.googleapis.com/paws/pawsx/x-final.tar.gz -q
     tar xzf x-final.tar.gz -C $DIR/
     python $REPO/utils_preprocess.py \
       --data_dir $DIR/x-final \
@@ -142,8 +142,8 @@ function download_squad {
     echo "download squad"
     base_dir=$DIR/squad/
     mkdir -p $base_dir && cd $base_dir
-    wget https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/train-v1.1.json -q --show-progress
-    wget https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/dev-v1.1.json -q --show-progress
+    wget https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/train-v1.1.json -q 
+    wget https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/dev-v1.1.json -q 
     echo "Successfully downloaded data at $DIR/squad"  >> $DIR/download.log
 }
 
@@ -152,7 +152,7 @@ function download_xquad {
     base_dir=$DIR/xquad/
     mkdir -p $base_dir && cd $base_dir
     for lang in ar de el en es hi ru th tr vi zh; do
-      wget https://raw.githubusercontent.com/deepmind/xquad/master/xquad.${lang}.json -q --show-progress
+      wget https://raw.githubusercontent.com/deepmind/xquad/master/xquad.${lang}.json -q
     done
     python $REPO/utils_preprocess.py --data_dir $base_dir --output_dir $base_dir --task xquad
     echo "Successfully downloaded data at $DIR/xquad" >> $DIR/download.log
@@ -163,7 +163,7 @@ function download_mlqa {
     base_dir=$DIR/mlqa/
     mkdir -p $base_dir && cd $base_dir
     zip_file=MLQA_V1.zip
-    wget https://dl.fbaipublicfiles.com/MLQA/${zip_file} -q --show-progress
+    wget https://dl.fbaipublicfiles.com/MLQA/${zip_file} -q
     unzip -qq ${zip_file}
     rm ${zip_file}
     python $REPO/utils_preprocess.py --data_dir $base_dir/MLQA_V1/test --output_dir $base_dir --task mlqa
@@ -176,8 +176,8 @@ function download_tydiqa {
     mkdir -p $base_dir && cd $base_dir
     tydiqa_train_file=tydiqa-goldp-v1.1-train.json
     tydiqa_dev_file=tydiqa-goldp-v1.1-dev.tgz
-    wget https://storage.googleapis.com/tydiqa/v1.1/${tydiqa_train_file} -q --show-progress
-    wget https://storage.googleapis.com/tydiqa/v1.1/${tydiqa_dev_file} -q --show-progress
+    wget https://storage.googleapis.com/tydiqa/v1.1/${tydiqa_train_file} -q 
+    wget https://storage.googleapis.com/tydiqa/v1.1/${tydiqa_dev_file} -q 
     tar -xf ${tydiqa_dev_file}
     rm ${tydiqa_dev_file}
     out_dir=$base_dir/tydiqa-goldp-v1.1-train
@@ -186,13 +186,13 @@ function download_tydiqa {
     echo "Successfully downloaded data at $DIR/tydiqa" >> $DIR/download.log
 }
 
-download_xnli
+#download_xnli
 #download_pawsx
 #download_tatoeba
 #download_bucc18
 #download_squad
 #download_xquad
-#download_mlqa
+download_mlqa
 #download_tydiqa
 #download_udpos
 #download_panx

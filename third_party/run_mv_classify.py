@@ -94,12 +94,25 @@ def set_seed(args):
     torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, lang2id=None):
+class ConcatDataset(torch.utils.data.Dataset):
+  def __init__(self, *datasets):
+    self.datasets = datasets
+
+  def __getitem__(self, i):
+    return tuple(d[i] for d in self.datasets)
+
+  def __len__(self):
+    return min(len(d) for d in self.datasets)
+
+
+def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+
+  train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
   train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
@@ -187,13 +200,15 @@ def train(args, train_dataset, model, tokenizer, lang2id=None):
   set_seed(args)  # Added here for reproductibility
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-    for step, batch in enumerate(epoch_iterator):
+    for step, concat_batch in enumerate(epoch_iterator):
       # Skip past any already trained steps if resuming training
       if steps_trained_in_current_epoch > 0:
         steps_trained_in_current_epoch -= 1
         continue
 
       model.train()
+      batch, dropped_batch = concat_batch
+
       batch = tuple(t.to(args.device) for t in batch)
       if args.tau > 0:
           input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
@@ -208,6 +223,47 @@ def train(args, train_dataset, model, tokenizer, lang2id=None):
         inputs["langs"] = batch[4]
       outputs = model(**inputs)
       loss = outputs[0]
+      logits = outputs[-1]
+
+      dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+      dropped_inputs = {"input_ids": dropped_batch[0],
+            "attention_mask": dropped_batch[1],
+            "labels": dropped_batch[3]}
+      #      "reduction": "none"}
+
+      if args.model_type != "distilbert":
+        # XLM and RoBERTa don"t use segment_ids
+        dropped_inputs["token_type_ids"] = dropped_batch[2] if args.model_type in ["bert", "xlnet"] else None
+
+      if args.model_type == "xlm":
+        dropped_inputs["langs"] = dropped_batch[4]
+
+      dropped_outputs = model(**dropped_inputs)
+      dropped_loss = dropped_outputs[0]
+      dropped_logits = dropped_outputs[-1]
+
+      if args.kl_weight > 0:
+        prob = torch.nn.functional.softmax(logits/args.kl_t, dim=1)
+        if args.kl_stop_grad:
+          prob = prob.detach()
+        if args.kl_t_scale_both:
+          kl_t = args.kl_t
+        else: 
+          kl_t = 1
+        if args.kl_t_scale_grad:
+          kl_loss_scale = kl_t * args.kl_t
+        else:
+          kl_loss_scale = 1
+        dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits/kl_t, dim=1)
+        if len(prob) > len(dropped_log_prob):
+          prob = prob[:len(dropped_log_prob)]
+        elif len(prob) < len(dropped_log_prob):
+          dropped_log_prob = dropped_log_prob[:len(prob)]
+        kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+        kl = kl_loss(dropped_log_prob, prob)
+        loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl*kl_loss_scale
+      else:
+        loss = 0.5*loss + 0.5*dropped_loss
 
       if args.n_gpu > 1:
         loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -399,7 +455,7 @@ def evaluate(args, model, tokenizer, split='train', language='en', lang2id=None,
   return results
 
 
-def load_and_cache_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False):
+def load_and_cache_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0):
   # Make sure only the first process in distributed training process the 
   # dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -409,9 +465,7 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
   output_mode = "classification"
   # Load data features from cache or dataset file
   lc = '_lc' if args.do_lower_case else ''
-  bpe_dropout = args.bpe_dropout
-  if split != 'train': bpe_dropout = 0
-  if bpe_dropout > 0:
+  if bpe_drop > 0:
     cached_features_file = os.path.join(
       args.data_dir,
       "cached_{}_{}_{}_{}_{}{}_drop{}".format(
@@ -421,7 +475,7 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
         str(task),
         str(language),
         lc,
-        str(bpe_dropout),
+        str(bpe_drop),
       ),
     )
   else:
@@ -465,7 +519,7 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
       pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
       pad_token_segment_id=0,
       lang2id=lang2id,
-      bpe_dropout=bpe_dropout,
+      bpe_dropout=bpe_drop,
     )
     if args.local_rank in [-1, 0]:
       logger.info("Saving features into cached file %s", cached_features_file)
@@ -642,7 +696,14 @@ def main():
   parser.add_argument("--server_ip", type=str, default="", help="For distant debugging.")
   parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
   parser.add_argument("--tau", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
-  parser.add_argument("--bpe_dropout", type=float, default=0, help="wait N times of decreasing dev score before early stop during training")
+
+  parser.add_argument("--bpe_dropout", default=0, type=float)
+  parser.add_argument("--kl_weight", default=0, type=float)
+  parser.add_argument("--kl_t", default=1, type=float)
+  parser.add_argument("--kl_t_scale_both", default=0, type=int, help="1 if scale both logits by t")
+  parser.add_argument("--kl_t_scale_grad", default=0, type=int, help="1 if multiply kl loss by t square")
+  parser.add_argument("--kl_stop_grad", default=0, type=int, help="1 if stop gradient to target")
+
   args = parser.parse_args()
 
   if (
@@ -750,7 +811,8 @@ def main():
       )
     model.to(args.device)
     train_dataset = load_and_cache_examples(args, args.task_name, tokenizer, split=args.train_split, language=args.train_language, lang2id=lang2id, evaluate=False)
-    global_step, tr_loss, best_score, best_checkpoint = train(args, train_dataset, model, tokenizer, lang2id)
+    dropped_train_dataset = load_and_cache_examples(args, args.task_name, tokenizer, split=args.train_split, language=args.train_language, lang2id=lang2id, bpe_drop=args.bpe_dropout, evaluate=False)
+    global_step, tr_loss, best_score, best_checkpoint = train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
     logger.info(" best checkpoint = {}, best score = {}".format(best_checkpoint, best_score))
 

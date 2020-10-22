@@ -354,7 +354,7 @@ def convert_examples_to_features(examples,
     label_ids = []
     for word, label in zip(example.words, example.labels):
       if isinstance(tokenizer, XLMTokenizer):
-        word_tokens = tokenizer.tokenize(word, lang=lang)
+        word_tokens = tokenizer.tokenize(word, lang=lang, dropout=bpe_dropout)
       else:
         word_tokens = tokenizer.tokenize(word, dropout=bpe_dropout)
       if len(word) != 0 and len(word_tokens) == 0:

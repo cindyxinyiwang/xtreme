@@ -13,20 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=0
+#SBATCH --mem=15GB
+
 REPO=$PWD
 GPU=${1:-0}
-MODEL=${2:-bert-base-multilingual-cased}
-#MODEL=${2:-xlm-roberta-base}
+#MODEL=${2:-bert-base-multilingual-cased}
+MODEL=${2:-xlm-roberta-base}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
-export CUDA_VISIBLE_DEVICES=$GPU
+#export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
 LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
 TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
-MLM_WEIGHT=0.001
+MLM_WEIGHT=0
 MLM_LANG='zh,ko,ja'
 OPTIM='Adam'
 MLM_START=5
@@ -55,7 +60,7 @@ fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-for SEED in 1;
+for SEED in 1 2 3 4 5;
 do
 if [ $MLM_WEIGHT == 0 ]; then
   OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_up${UPDATE_PRETRAIN}_s${SEED}/"

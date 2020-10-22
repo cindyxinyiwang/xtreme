@@ -13,21 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=0
+#SBATCH --mem=15GB
+
 REPO=$PWD
 GPU=${1:-0}
 MODEL=${2:-bert-base-multilingual-cased}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
-export CUDA_VISIBLE_DEVICES=$GPU
+#export CUDA_VISIBLE_DEVICES=$GPU
 
 TASK='xnli'
 LR=2e-5
 EPOCH=5
 MAXL=128
-TRAIN_LANG="hi"
-LANGS="hi"
+TRAIN_LANG="en"
+LANGS="ar,bg,de,el,en,es,fr,hi,ru,sw,th,tr,ur,vi,zh"
 LC=""
+BPE_DROP=0.1
+
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
 elif [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-mlm-tlm-xnli15-1024" ]; then
@@ -45,7 +52,9 @@ else
   GRAD_ACC=4
 fi
 
-SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}/"
+for SEED in 1 2 3 4 5;
+do
+SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}_bped${BPE_DROP}_s${SEED}/"
 mkdir -p $SAVE_DIR
 
 python $PWD/third_party/run_classify.py \
@@ -69,4 +78,7 @@ python $PWD/third_party/run_classify.py \
   --predict_languages $LANGS \
   --save_only_best_checkpoint \
   --overwrite_output_dir \
+  --seed $SEED \
+  --bpe_dropout $BPE_DROP \
   --eval_test_set $LC
+done
