@@ -236,10 +236,11 @@ def udpos_preprocess(args):
           with open(prefix + '.mt.tsv', 'w') as fout:
             for idx, (sent, tag, _) in enumerate(data[split]):
               newline = '\n' if idx != len(data[split]) - 1 else ''
-              if split == 'test':
-                fout.write('{}{}'.format(' '.join(sent, newline)))
-              else:
-                fout.write('{}\t{}{}'.format(' '.join(sent), ' '.join(tag), newline))
+              #if split == 'test':
+              #  fout.write('{}{}'.format(' '.join(sent, newline)))
+              #else:
+              #  fout.write('{}\t{}{}'.format(' '.join(sent), ' '.join(tag), newline))
+              fout.write('{}\t{}{}'.format(' '.join(sent), ' '.join(tag), newline))
           check_file(prefix + '.mt.tsv')
           print('  - finish checking ' + prefix + '.mt.tsv')
         elif suffix == 'tsv':
@@ -247,10 +248,11 @@ def udpos_preprocess(args):
             for sidx, (sent, tag, _) in enumerate(data[split]):
               for widx, (w, t) in enumerate(zip(sent, tag)):
                 newline = '' if (sidx == len(data[split]) - 1) and (widx == len(sent) - 1) else '\n'
-                if split == 'test':
-                  fout.write('{}{}'.format(w, newline))
-                else:
-                  fout.write('{}\t{}{}'.format(w, t, newline))
+                #if split == 'test':
+                #  fout.write('{}{}'.format(w, newline))
+                #else:
+                #  fout.write('{}\t{}{}'.format(w, t, newline))
+                fout.write('{}\t{}{}'.format(w, t, newline))
               fout.write('\n')
         elif suffix == 'conll':
           with open(prefix + '.conll', 'w') as fout:
@@ -319,7 +321,8 @@ def pawsx_preprocess(args):
       file = split2file[split]
       infile = os.path.join(args.data_dir, lang, "{}.tsv".format(file))
       outfile = os.path.join(args.output_dir, "{}-{}.tsv".format(split, lang))
-      _preprocess_one_file(infile, outfile, remove_label=(split == 'test'))
+      #_preprocess_one_file(infile, outfile, remove_label=(split == 'test'))
+      _preprocess_one_file(infile, outfile, remove_label=False)
       print(f'finish preprocessing {outfile}')
 
 def xnli_preprocess(args):
@@ -407,13 +410,13 @@ def tatoeba_preprocess(args):
 
 def xquad_preprocess(args):
   # Remove the test annotations to prevent accidental cheating
-  remove_qa_test_annotations(args.data_dir)
-
+  #remove_qa_test_annotations(args.data_dir)
+  pass
 
 def mlqa_preprocess(args):
   # Remove the test annotations to prevent accidental cheating
-  remove_qa_test_annotations(args.data_dir)
-
+  #remove_qa_test_annotations(args.data_dir)
+  pass
 
 def tydiqa_preprocess(args):
   LANG2ISO = {'arabic': 'ar', 'bengali': 'bn', 'english': 'en', 'finnish': 'fi',
@@ -461,7 +464,7 @@ def tydiqa_preprocess(args):
     os.rename(src_file, dst_file)
 
   # Remove the test annotations to prevent accidental cheating
-  remove_qa_test_annotations(dev_dir)
+  #remove_qa_test_annotations(dev_dir)
 
 
 def remove_qa_test_annotations(test_dir):

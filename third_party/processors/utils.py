@@ -83,6 +83,7 @@ def convert_examples_to_features(
   pad_token_segment_id=0,
   mask_padding_with_zero=True,
   lang2id=None,
+  bpe_dropout=0,
 ):
   """
   Loads a data file into a list of ``InputFeatures``
@@ -119,9 +120,9 @@ def convert_examples_to_features(
     #   example = processor.tfds_map(example)
 
     if isinstance(tokenizer, XLMTokenizer):
-      inputs = tokenizer.encode_plus(example.text_a, example.text_b, add_special_tokens=True, max_length=max_length, lang=example.language)
+      inputs = tokenizer.encode_plus(example.text_a, example.text_b, add_special_tokens=True, max_length=max_length, lang=example.language, dropout=bpe_dropout)
     else:
-      inputs = tokenizer.encode_plus(example.text_a, example.text_b, add_special_tokens=True, max_length=max_length)
+      inputs = tokenizer.encode_plus(example.text_a, example.text_b, add_special_tokens=True, max_length=max_length, dropout=bpe_dropout)
     
     input_ids, token_type_ids = inputs["input_ids"], inputs["token_type_ids"]
 

@@ -28,7 +28,7 @@ if [ ! -d "${MODEL_PATH}" ]; then
 fi
 
 DIR=${DATA_DIR}/${TGT}/
-PREDICTIONS_DIR=${REPO}/predictions
+PREDICTIONS_DIR=${MODEL_PATH}/predictions
 PRED_DIR=${PREDICTIONS_DIR}/$TGT/
 mkdir -p "${PRED_DIR}"
 
@@ -58,9 +58,11 @@ for lang in ${langs[@]}; do
 
   #CUDA_VISIBLE_DEVICES=${GPU} python third_party/run_squad.py \
   python third_party/run_squad.py \
+    --data_dir $DIR \
+    --model_name ${MODEL} \
     --model_type ${MODEL_TYPE} \
     --model_name_or_path ${MODEL_PATH} \
-    --do_eval \
+    --do_test \
     --do_lower_case \
     --eval_lang ${lang} \
     --predict_file "${TEST_FILE}" \

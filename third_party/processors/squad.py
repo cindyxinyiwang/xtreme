@@ -85,7 +85,7 @@ def _is_whitespace(c):
     return False
 
 
-def squad_convert_example_to_features(example, max_seq_length, doc_stride, max_query_length, is_training, lang2id):
+def squad_convert_example_to_features(example, max_seq_length, doc_stride, max_query_length, is_training, lang2id, bpe_dropout=0):
     features = []
     if is_training and not example.is_impossible:
         # Get start and end position
@@ -105,9 +105,9 @@ def squad_convert_example_to_features(example, max_seq_length, doc_stride, max_q
     for (i, token) in enumerate(example.doc_tokens):
         orig_to_tok_index.append(len(all_doc_tokens))
         if lang2id is None:
-            sub_tokens = tokenizer.tokenize(token)
+            sub_tokens = tokenizer.tokenize(token, dropout=bpe_dropout)
         else:
-            sub_tokens = tokenizer.tokenize(token, lang=example.language)
+            sub_tokens = tokenizer.tokenize(token, lang=example.language, dropout=bpe_dropout)
         for sub_token in sub_tokens:
             tok_to_orig_index.append(i)
             all_doc_tokens.append(sub_token)
@@ -126,7 +126,7 @@ def squad_convert_example_to_features(example, max_seq_length, doc_stride, max_q
 
     spans = []
 
-    truncated_query = tokenizer.encode(example.question_text, add_special_tokens=False, max_length=max_query_length)
+    truncated_query = tokenizer.encode(example.question_text, add_special_tokens=False, max_length=max_query_length, dropout=bpe_dropout)
     sequence_added_tokens = (
         tokenizer.max_len - tokenizer.max_len_single_sentence + 1
         if "roberta" in str(type(tokenizer))
@@ -145,7 +145,8 @@ def squad_convert_example_to_features(example, max_seq_length, doc_stride, max_q
             pad_to_max_length=True,
             stride=max_seq_length - doc_stride - len(truncated_query) - sequence_pair_added_tokens,
             truncation_strategy="only_second" if tokenizer.padding_side == "right" else "only_first",
-            return_token_type_ids=True
+            return_token_type_ids=True,
+            dropout=bpe_dropout
         )
 
         paragraph_len = min(
@@ -268,7 +269,7 @@ def squad_convert_example_to_features_init(tokenizer_for_convert):
 
 def squad_convert_examples_to_features(
     examples, tokenizer, max_seq_length, doc_stride, max_query_length, is_training, return_dataset=False, threads=1,
-    lang2id=None
+    lang2id=None, bpe_dropout=0
 ):
     """
     Converts a list of examples into a list of features that can be directly given as input to a model.
@@ -315,7 +316,8 @@ def squad_convert_examples_to_features(
             doc_stride=doc_stride,
             max_query_length=max_query_length,
             is_training=is_training,
-            lang2id=lang2id
+            lang2id=lang2id,
+            bpe_dropout=bpe_dropout,
         )
         features = list(
             tqdm(

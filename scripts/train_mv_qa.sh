@@ -31,7 +31,14 @@ OUT_DIR=${6:-"$REPO/outputs/"}
 MAXL=384
 LR=3e-5
 NUM_EPOCHS=2
-BPE_DROP=0.1
+BPE_DROP=0.2
+KL=0.2 
+KL_T=1
+KL_TB=0
+KL_TG=0
+KL_SG=0
+
+
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
 elif [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-mlm-tlm-xnli15-1024" ]; then
@@ -43,7 +50,7 @@ fi
 # Model path where trained model should be stored
 for SEED in 2 3 4 5;
 do
-  MODEL_PATH=$OUT_DIR/$SRC/${MODEL}_LR${LR}_EPOCH${NUM_EPOCHS}_maxlen${MAXL}_bped${BPE_DROP}_s${SEED}
+  MODEL_PATH=$OUT_DIR/$SRC/${MODEL}_LR${LR}_EPOCH${NUM_EPOCHS}_maxlen${MAXL}_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_kltb${KL_TB}_kltg${KL_TG}_klsg${KL_SG}_s${SEED}
   mkdir -p $MODEL_PATH
   # Train either on the SQuAD or TyDiQa-GoldP English train file
   if [ $SRC == 'squad' ]; then
@@ -56,7 +63,7 @@ do
   
   # train
   #CUDA_VISIBLE_DEVICES=$GPU python third_party/run_squad.py \
-  python third_party/run_squad.py \
+  python third_party/run_mv_squad.py \
     --data_dir  ${DATA_DIR}/${SRC} \
     --model_type ${MODEL_TYPE} \
     --model_name_or_path ${MODEL} \
@@ -81,6 +88,11 @@ do
     --seed $SEED \
     --train_lang en \
     --bpe_dropout $BPE_DROP \
+    --kl_weight $KL \
+    --kl_t $KL_T \
+    --kl_t_scale_both $KL_TB \
+    --kl_t_scale_grad $KL_TG \
+    --kl_stop_grad $KL_SG \
     --eval_lang en
   
   

@@ -102,12 +102,24 @@ def to_list(tensor):
   return tensor.detach().cpu().tolist()
 
 
-def train(args, train_dataset, model, tokenizer):
+class ConcatDataset(torch.utils.data.Dataset):
+  def __init__(self, *datasets):
+    self.datasets = datasets
+
+  def __getitem__(self, i):
+    return tuple(d[i] for d in self.datasets)
+
+  def __len__(self):
+    return min(len(d) for d in self.datasets)
+
+
+def train(args, train_dataset, dropped_train_dataset, model, tokenizer):
   """ Train the model """
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+  train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
   train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
@@ -200,7 +212,7 @@ def train(args, train_dataset, model, tokenizer):
 
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-    for step, batch in enumerate(epoch_iterator):
+    for step, concat_batch in enumerate(epoch_iterator):
 
       # Skip past any already trained steps if resuming training
       if steps_trained_in_current_epoch > 0:
@@ -208,6 +220,7 @@ def train(args, train_dataset, model, tokenizer):
         continue
 
       model.train()
+      batch, dropped_batch = concat_batch
       batch = tuple(t.to(args.device) for t in batch)
 
       inputs = {
@@ -227,11 +240,62 @@ def train(args, train_dataset, model, tokenizer):
       outputs = model(**inputs)
       # model outputs are always tuple in transformers (see doc)
       loss = outputs[0]
+      start_logits = outputs[-2]
+      end_logits = outputs[-1]
+
+      # dropped batch loss
+      dropped_batch = tuple(t.to(args.device) for t in dropped_batch)
+
+      dropped_inputs = {
+        "input_ids": dropped_batch[0],
+        "attention_mask": dropped_batch[1],
+        "token_type_ids": None if args.model_type in ["xlm", "xlm-roberta", "distilbert"] else dropped_batch[2],
+        "start_positions": dropped_batch[3],
+        "end_positions": dropped_batch[4],
+      }
+
+      if args.model_type in ["xlnet", "xlm"]:
+        dropped_inputs.update({"cls_index": dropped_batch[5], "p_mask": dropped_batch[6]})
+        if args.version_2_with_negative:
+          dropped_inputs.update({"is_impossible": dropped_batch[7]})
+      if args.model_type == "xlm":
+        dropped_inputs["langs"] = dropped_batch[7]
+      dropped_outputs = model(**dropped_inputs)
+      # model outputs are always tuple in transformers (see doc)
+      dropped_loss = dropped_outputs[0]
+      dropped_start_logits = dropped_outputs[-2]
+      dropped_end_logits = dropped_outputs[-1]
+
+      if args.kl_weight > 0:
+        start_prob = torch.nn.functional.softmax(start_logits/args.kl_t, dim=1)
+        end_prob = torch.nn.functional.softmax(end_logits/args.kl_t, dim=1)
+        if args.kl_stop_grad:
+          start_prob = start_prob.detach()
+          end_prob = end_prob.detach()
+        if args.kl_t_scale_both:
+          kl_t = args.kl_t
+        else: 
+          kl_t = 1
+        if args.kl_t_scale_grad:
+          kl_loss_scale = kl_t * args.kl_t
+        else:
+          kl_loss_scale = 1
+        dropped_start_log_prob = torch.nn.functional.log_softmax(dropped_start_logits/kl_t, dim=1)
+        dropped_end_log_prob = torch.nn.functional.log_softmax(dropped_end_logits/kl_t, dim=1)
+        kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+        start_kl = kl_loss(dropped_start_log_prob, start_prob)
+        end_kl = kl_loss(dropped_end_log_prob, end_prob)
+        loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*(start_kl+end_kl)*kl_loss_scale/2
+      else:
+        loss = 0.5*loss + 0.5*dropped_loss
+
 
       if args.n_gpu > 1:
         loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
       if args.gradient_accumulation_steps > 1:
         loss = loss / args.gradient_accumulation_steps
+
+
 
       if args.fp16:
         with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -422,12 +486,12 @@ def evaluate(args, model, tokenizer, prefix="", language='en', lang2id=None):
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False,
-              language='en', lang2id=None):
+              language='en', lang2id=None, bpe_dropout=0):
   if args.local_rank not in [-1, 0] and not evaluate:
     # Make sure only the first process in distributed training process the dataset, and the others will use the cache
     torch.distributed.barrier()
 
-  bpe_dropout = args.bpe_dropout if not evaluate else 0
+  if evaluate: assert bpe_dropout == 0
   # Load data features from cache or dataset file
   input_dir = args.data_dir if args.data_dir else "."
   model_name = args.model_name if args.model_name is not None else args.model_name_or_path
@@ -701,6 +765,12 @@ def main():
 
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--bpe_dropout", type=float, default=0, help="wait N times of decreasing dev score before early stop during training")
+  parser.add_argument("--kl_weight", default=0, type=float)
+  parser.add_argument("--kl_t", default=1, type=float)
+  parser.add_argument("--kl_t_scale_both", default=0, type=int, help="1 if scale both logits by t")
+  parser.add_argument("--kl_t_scale_grad", default=0, type=int, help="1 if multiply kl loss by t square")
+  parser.add_argument("--kl_stop_grad", default=0, type=int, help="1 if stop gradient to target")
+
   args = parser.parse_args()
 
   if (
@@ -805,7 +875,8 @@ def main():
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False, language=args.train_lang, lang2id=lang2id)
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+    dropped_train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False, language=args.train_lang, lang2id=lang2id, bpe_dropout=args.bpe_dropout)
+    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Save the trained model and the tokenizer
