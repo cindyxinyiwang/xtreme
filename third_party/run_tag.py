@@ -82,8 +82,8 @@ def set_seed(args):
 
 def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None, train_dataset_mlm=None):
   """Train the model."""
-  if args.local_rank in [-1, 0]:
-    tb_writer = SummaryWriter()
+  #if args.local_rank in [-1, 0]:
+  #  tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -292,10 +292,10 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           if args.local_rank == -1 and args.evaluate_during_training:
             # Only evaluate on single GPU otherwise metrics may not average well
             results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.train_langs, lang2id=lang2id)
-            for key, value in results.items():
-              tb_writer.add_scalar("eval_{}".format(key), value, global_step)
-          tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-          tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
+            #for key, value in results.items():
+            #  tb_writer.add_scalar("eval_{}".format(key), value, global_step)
+          #tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
+          #tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
           logging_loss = tr_loss
 
         if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
@@ -323,8 +323,8 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
                 logger.info("early stop! patience={}".format(patience))
                 epoch_iterator.close()
                 train_iterator.close()
-                if args.local_rank in [-1, 0]:
-                  tb_writer.close()
+                #if args.local_rank in [-1, 0]:
+                #  tb_writer.close()
                 return global_step, tr_loss / global_step
           else:
             # Save model checkpoint
@@ -344,8 +344,8 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
       train_iterator.close()
       break
 
-  if args.local_rank in [-1, 0]:
-    tb_writer.close()
+  #if args.local_rank in [-1, 0]:
+  #  tb_writer.close()
 
   return global_step, tr_loss / global_step
 
@@ -427,7 +427,6 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
     logger.info("***** Evaluation result %s in %s *****" % (prefix, lang))
     for key in sorted(results.keys()):
       logger.info("  %s = %s", key, str(results[key]))
-
   return results, preds_list
 
 

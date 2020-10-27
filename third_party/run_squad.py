@@ -104,8 +104,8 @@ def to_list(tensor):
 
 def train(args, train_dataset, model, tokenizer):
   """ Train the model """
-  if args.local_rank in [-1, 0]:
-    tb_writer = SummaryWriter()
+  #if args.local_rank in [-1, 0]:
+  #  tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -256,10 +256,10 @@ def train(args, train_dataset, model, tokenizer):
           # Only evaluate when single GPU otherwise metrics may not average well
           if args.local_rank == -1 and args.evaluate_during_training:
             results = evaluate(args, model, tokenizer)
-            for key, value in results.items():
-              tb_writer.add_scalar("eval_{}".format(key), value, global_step)
-          tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-          tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
+            #for key, value in results.items():
+            #  tb_writer.add_scalar("eval_{}".format(key), value, global_step)
+          #tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
+          #tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
           logging_loss = tr_loss
 
         # Save model checkpoint
@@ -286,8 +286,8 @@ def train(args, train_dataset, model, tokenizer):
       train_iterator.close()
       break
 
-  if args.local_rank in [-1, 0]:
-    tb_writer.close()
+  #if args.local_rank in [-1, 0]:
+  #  tb_writer.close()
 
   return global_step, tr_loss / global_step
 

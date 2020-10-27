@@ -91,8 +91,8 @@ class ConcatDataset(torch.utils.data.Dataset):
 
 def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None):
   """Train the model."""
-  if args.local_rank in [-1, 0]:
-    tb_writer = SummaryWriter()
+  #if args.local_rank in [-1, 0]:
+  #  tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
@@ -293,10 +293,10 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           if args.local_rank == -1 and args.evaluate_during_training:
             # Only evaluate on single GPU otherwise metrics may not average well
             results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.train_langs, lang2id=lang2id)
-            for key, value in results.items():
-              tb_writer.add_scalar("eval_{}".format(key), value, global_step)
-          tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-          tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
+            #for key, value in results.items():
+            #  tb_writer.add_scalar("eval_{}".format(key), value, global_step)
+          #tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
+          #tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
           logging_loss = tr_loss
 
         if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
@@ -324,8 +324,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
                 logger.info("early stop! patience={}".format(patience))
                 epoch_iterator.close()
                 train_iterator.close()
-                if args.local_rank in [-1, 0]:
-                  tb_writer.close()
+                #if args.local_rank in [-1, 0]:
+                #  tb_writer.close()
                 return global_step, tr_loss / global_step
           else:
             # Save model checkpoint
@@ -345,8 +345,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       train_iterator.close()
       break
 
-  if args.local_rank in [-1, 0]:
-    tb_writer.close()
+  #if args.local_rank in [-1, 0]:
+  #  tb_writer.close()
 
   return global_step, tr_loss / global_step
 
