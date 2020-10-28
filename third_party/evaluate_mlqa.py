@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 import unicodedata
-
+import os
 
 PUNCT = {chr(i) for i in range(sys.maxunicode) if unicodedata.category(chr(i)).startswith('P')}.union(string.punctuation)
 WHITESPACE_LANGS = ['en', 'es', 'hi', 'vi', 'de', 'ar']
@@ -142,6 +142,7 @@ if __name__ == '__main__':
     parser.add_argument('dataset_file', help='Dataset file')
     parser.add_argument('prediction_file', help='Prediction File')
     parser.add_argument('answer_language', help='Language code of answer language')
+    parser.add_argument('prediction_dir', help='Directory for prediction')
 
     args = parser.parse_args()
     with open(args.dataset_file) as dataset_file:
@@ -153,4 +154,13 @@ if __name__ == '__main__':
         dataset = dataset_json['data']
     with open(args.prediction_file) as prediction_file:
         predictions = json.load(prediction_file)
-    print(json.dumps(evaluate(dataset, predictions, args.answer_language)))
+    result = evaluate(dataset, predictions, args.answer_language)
+    print(json.dumps(result))
+    result_file = os.path.join(args.prediction_dir, "mlqa_test_results.txt")
+    with open(result_file, 'a') as result_file:
+      result_file.write("**************\n")
+      result_file.write("language = {}\n".format(args.answer_language))
+      for k, v in result.items():
+        result_file.write("{} = {}\n".format(k, v))
+
+
