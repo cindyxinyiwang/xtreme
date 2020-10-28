@@ -24,14 +24,17 @@ REPO=$PWD
 MODEL=${1:-bert-base-multilingual-cased}
 SRC=${2:-squad}
 TGT=${3:-xquad}
+#SRC=${2:-tydiqa}
+#TGT=${3:-tydiqa}
 GPU=${4:-0}
 DATA_DIR=${5:-"$REPO/download/"}
-OUT_DIR=${6:-"$REPO/outputs/"}
+#OUT_DIR=${6:-"$REPO/outputs/"}
+OUT_DIR=${6:-"/projects/tir4/users/xinyiw1/xtreme/outputs/"}
 
 MAXL=384
 LR=3e-5
 NUM_EPOCHS=2
-BPE_DROP=0.1
+BPE_DROP=0
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
 elif [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-mlm-tlm-xnli15-1024" ]; then
@@ -41,7 +44,7 @@ elif [ $MODEL == "xlm-roberta-large" ] || [ $MODEL == "xlm-roberta-base" ]; then
 fi
 
 # Model path where trained model should be stored
-for SEED in 2 3 4 5;
+for SEED in 1;
 do
   MODEL_PATH=$OUT_DIR/$SRC/${MODEL}_LR${LR}_EPOCH${NUM_EPOCHS}_maxlen${MAXL}_bped${BPE_DROP}_s${SEED}
   mkdir -p $MODEL_PATH
@@ -50,17 +53,17 @@ do
     TRAIN_FILE=${DATA_DIR}/squad/train-v1.1.json
     PREDICT_FILE=${DATA_DIR}/squad/dev-v1.1.json
   else
-    TRAIN_FILE=${DATA_DIR}/tydiqa/tydiqa-goldp-v1.1-train/tydiqa.goldp.en.train.json
+    TRAIN_FILE=${DATA_DIR}/tydiqa/tydiqa-goldp-v1.1-train/tydiqa.en.train.json
     PREDICT_FILE=${DATA_DIR}/tydiqa/tydiqa-goldp-v1.1-dev/tydiqa.en.dev.json
   fi
   
   # train
   #CUDA_VISIBLE_DEVICES=$GPU python third_party/run_squad.py \
+  #  --do_lower_case \
   python third_party/run_squad.py \
     --data_dir  ${DATA_DIR}/${SRC} \
     --model_type ${MODEL_TYPE} \
     --model_name_or_path ${MODEL} \
-    --do_lower_case \
     --do_train \
     --do_eval \
     --train_file ${TRAIN_FILE} \
@@ -88,4 +91,5 @@ do
   #bash scripts/predict_qa.sh $MODEL $MODEL_TYPE $MODEL_PATH $TGT $GPU $DATA_DIR
   bash scripts/predict_qa.sh $MODEL $MODEL_TYPE $MODEL_PATH xquad $GPU $DATA_DIR
   bash scripts/predict_qa.sh $MODEL $MODEL_TYPE $MODEL_PATH mlqa $GPU $DATA_DIR
+  bash scripts/eval_qa.sh $MODEL_PATH 
 done

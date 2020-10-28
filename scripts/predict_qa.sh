@@ -36,6 +36,7 @@ if [ $TGT == 'xquad' ]; then
   langs=( en es de el ru tr ar vi th zh hi )
 elif [ $TGT == 'mlqa' ]; then
   langs=( en es de ar hi vi zh )
+  #langs=( zh )
 elif [ $TGT == 'tydiqa' ]; then
   langs=( en ar bn fi id ko ru sw te )
 fi
@@ -57,13 +58,13 @@ for lang in ${langs[@]}; do
   fi
 
   #CUDA_VISIBLE_DEVICES=${GPU} python third_party/run_squad.py \
+  #  --do_lower_case \
   python third_party/run_squad.py \
     --data_dir $DIR \
     --model_name ${MODEL} \
     --model_type ${MODEL_TYPE} \
     --model_name_or_path ${MODEL_PATH} \
     --do_test \
-    --do_lower_case \
     --eval_lang ${lang} \
     --predict_file "${TEST_FILE}" \
     --log_file ${MODEL_PATH}/train.log \
