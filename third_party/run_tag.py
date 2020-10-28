@@ -80,7 +80,7 @@ def set_seed(args):
     torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None, train_dataset_mlm=None):
+def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None):
   """Train the model."""
   #if args.local_rank in [-1, 0]:
   #  tb_writer = SummaryWriter()
@@ -88,9 +88,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
   train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-  if train_dataset_mlm is not None:
-    train_mlm_sampler = RandomSampler(train_dataset_mlm) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_mlm_dataloader = DataLoader(train_dataset_mlm, sampler=train_sampler, batch_size=args.train_batch_size)
 
   if args.max_steps > 0:
     t_total = args.max_steps
@@ -186,10 +183,13 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
   set_seed(args) # Add here for reproductibility (even between python 2 and 3)
 
-  if train_dataset_mlm is not None:
-    mlm_iter = iter(train_mlm_dataloader)
   cur_epoch = 0
   for _ in train_iterator:
+    if args.resample_dataset:
+      logger.info("Resample dataset for training....")
+      train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id)
+      train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+      train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
     if cur_epoch == args.update_pretrained_epoch and args.optimizer == 'RecAdam':
@@ -212,29 +212,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
       outputs = model(**inputs)
       loss = outputs[0]
-      if train_dataset_mlm is not None and cur_epoch >= args.mlm_start_epoch and cur_epoch <= args.mlm_end_epoch:
-        try:
-          mlm_batch = next(mlm_iter)
-        except:
-          mlm_iter = iter(train_mlm_dataloader)
-          mlm_batch = next(mlm_iter)
-        masked_inputs, masked_targets = utils.mask_tokens(mlm_batch[0], tokenizer)
-        mlm_batch = tuple(t.to(args.device) for t in batch if t is not None)
-        masked_inputs = masked_inputs.to(args.device)
-        masked_targets = masked_targets.to(args.device)
-        mlm_inputs = {"input_ids": masked_inputs,
-              "attention_mask": mlm_batch[1],
-              "masked_lm_labels": masked_targets}
-        if args.model_type != "distilbert":
-          # XLM and RoBERTa don"t use segment_ids
-          mlm_inputs["token_type_ids"] = mlm_batch[2] if args.model_type in ["bert", "xlnet"] else None
-
-        if args.model_type == "xlm":
-          mlm_inputs["langs"] = mlm_batch[4]
-
-        mlm_outputs = model.forward_mlm(**mlm_inputs)
-        mlm_loss = mlm_outputs[0]
-        loss = loss + args.mlm_weight*mlm_loss
 
       if args.n_gpu > 1:
         # mean() to average on multi-gpu parallel training
@@ -247,33 +224,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           scaled_loss.backward()
       else:
         loss.backward()
-
-      if args.tau > 0:
-          input_ids = utils.switch_out(batch[0], batch[1], args.tau, tokenizer.unk_token_id, tokenizer.pad_token_id, tokenizer.cls_token_id, tokenizer.sep_token_id, tokenizer.vocab_size)
-          inputs = {"input_ids": input_ids,
-                "attention_mask": batch[1],
-                "labels": batch[3]}
-
-          if args.model_type != "distilbert":
-            # XLM and RoBERTa don"t use segment_ids
-            inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
-
-          if args.model_type == "xlm":
-            inputs["langs"] = batch[4]
-
-          outputs = model(**inputs)
-          aug_loss = outputs[0]
-
-          if args.n_gpu > 1:
-            # mean() to average on multi-gpu parallel training
-            aug_loss = aug_loss.mean()
-          if args.gradient_accumulation_steps > 1:
-            aug_loss = aug_loss / args.gradient_accumulation_steps
-          if args.fp16:
-            with amp.scale_loss(aug_lossloss, optimizer) as scaled_loss:
-              scaled_loss.backward()
-          else:
-            aug_loss.backward()
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -499,6 +449,61 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+  # Make sure only the first process in distributed training process
+  # the dataset, and the others will use the cache
+  if args.local_rank not in [-1, 0] and not evaluate:
+    torch.distributed.barrier()
+
+  # Load data features from cache or dataset file
+  bpe_dropout = args.bpe_dropout
+  if mode != 'train': bpe_dropout = 0
+  assert bpe_dropout > 0
+  langs = lang.split(',')
+  logger.info("all languages = {}".format(lang))
+  features = []
+  for lg in langs:
+    data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
+    logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
+    examples = read_examples_from_file(data_file, lg, lang2id)
+    features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
+                        cls_token_at_end=bool(args.model_type in ["xlnet"]),
+                        cls_token=tokenizer.cls_token,
+                        cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
+                        sep_token=tokenizer.sep_token,
+                        sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
+                        pad_on_left=bool(args.model_type in ["xlnet"]),
+                        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+                        pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
+                        pad_token_label_id=pad_token_label_id,
+                        lang=lg,
+                        bpe_dropout=bpe_dropout,
+                        )
+    features.extend(features_lg)
+
+  # Make sure only the first process in distributed training process
+  # the dataset, and the others will use the cache
+  if args.local_rank == 0 and not evaluate:
+    torch.distributed.barrier()
+
+  if few_shot > 0 and mode == 'train':
+    logger.info("Original no. of examples = {}".format(len(features)))
+    features = features[: few_shot]
+    logger.info('Using few-shot learning on {} examples'.format(len(features)))
+
+  # Convert to Tensors and build dataset
+  all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+  all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
+  all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+  all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
+  if args.model_type == 'xlm' and features[0].langs is not None:
+    all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
+    logger.info('all_langs[0] = {}'.format(all_langs[0]))
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
+  else:
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+  return dataset
+
 
 def main():
   parser = argparse.ArgumentParser()
@@ -615,6 +620,7 @@ def main():
 
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--bpe_dropout", default=0, type=float)
+  parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   parser.add_argument("--fix_class", action='store_true')
   # RecAdam parameters
   parser.add_argument("--optimizer", type=str, default="RecAdam", choices=["Adam", "RecAdam"],
@@ -742,11 +748,7 @@ def main():
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    if args.mlm_weight > 0:
-      train_dataset_mlm = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.mlm_lang, lang2id=lang2id, few_shot=args.few_shot)
-    else:
-      train_dataset_mlm = None
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model, train_dataset_mlm=train_dataset_mlm)
+    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,
