@@ -414,6 +414,7 @@ def evaluate(args, model, tokenizer, prefix="", language='en', lang2id=None):
       args.version_2_with_negative,
       args.null_score_diff_threshold,
       tokenizer,
+      do_final_text=(language != 'zh'),
     )
 
   # Compute the F1 and exact scores.
