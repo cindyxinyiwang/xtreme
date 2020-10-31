@@ -95,10 +95,10 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   #  tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-  train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+  concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
-  train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-  train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+  train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
+  train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
   if args.max_steps > 0:
     t_total = args.max_steps
@@ -176,7 +176,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   # Train!
   logger.info("***** Running training *****")
-  logger.info("  Num examples = %d", len(train_dataset))
+  logger.info("  Num examples = %d", len(concat_train_dataset))
   logger.info("  Num Epochs = %d", args.num_train_epochs)
   logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
   logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
@@ -202,9 +202,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
         logger.info("Resample both dataset for training....")
         train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id)
       dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id)
-      train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
-      train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-      train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+      concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+      train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
+      train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1

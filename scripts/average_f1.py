@@ -94,6 +94,7 @@ def qa_results(filename):
   exact_df = pd.DataFrame(seeded_exact_results)
   combined_df = pd.concat([df, exact_df], keys=('f1','exact f1'))
   print(combined_df)
+  print(combined_df.mean(axis=1))
   print("xquad ave f1 over random seeds:", combined_df.xs('f1').mean(axis=1).mean())
   print("xquad ave exact f1 over random seeds:", combined_df.xs('exact f1').mean(axis=1).mean())
   
@@ -106,7 +107,7 @@ def qa_results(filename):
   for seed in seeds:
     results = {}
     exact_results = {}
-    c_f = filename + "_s{}/predictions/mlqa/test_results.txt".format(seed)
+    c_f = filename + "_s{}/predictions/mlqa/mlqa_test_results.txt".format(seed)
     if os.path.exists(c_f):
         with open(c_f, 'r') as f:
             for line in f:
@@ -129,6 +130,7 @@ def qa_results(filename):
   exact_df = pd.DataFrame(seeded_exact_results)
   combined_df = pd.concat([df, exact_df], keys=('f1','exact f1'))
   print(combined_df)
+  print(combined_df.mean(axis=1))
   print("mlqa ave f1 over random seeds:", combined_df.xs('f1').mean(axis=1).mean())
   print("mlqa ave exact f1 over random seeds:", combined_df.xs('exact f1').mean(axis=1).mean())
   
