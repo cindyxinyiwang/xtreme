@@ -113,7 +113,7 @@ class ConcatDataset(torch.utils.data.Dataset):
     return min(len(d) for d in self.datasets)
 
 
-def train(args, train_dataset, dropped_train_dataset, model, tokenizer):
+def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id):
   """ Train the model """
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
@@ -211,6 +211,16 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer):
   set_seed(args)
 
   for _ in train_iterator:
+    if args.resample_dataset:
+      logger.info("Resample dataset for training....")
+      if args.resample_both_dataset:
+        logger.info("Resample both dataset for training....")
+        train_dataset = load_examples(args, tokenizer, evaluate=False, output_examples=False, language=args.train_lang, lang2id=lang2id, bpe_dropout=args.bpe_dropout)
+      dropped_train_dataset = load_examples(args, tokenizer, evaluate=False, output_examples=False, language=args.train_lang, lang2id=lang2id, bpe_dropout=args.bpe_dropout)
+      train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+      train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+      train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, concat_batch in enumerate(epoch_iterator):
 
@@ -568,6 +578,81 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
     return dataset, examples, features
   return dataset
 
+def load_examples(args, tokenizer, evaluate=False, output_examples=False,
+              language='en', lang2id=None, bpe_dropout=0):
+  if args.local_rank not in [-1, 0] and not evaluate:
+    # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+    torch.distributed.barrier()
+
+  assert not evaluate
+  assert bpe_dropout > 0
+  # Load data features from cache or dataset file
+  input_dir = args.data_dir if args.data_dir else "."
+  model_name = args.model_name if args.model_name is not None else args.model_name_or_path
+  if bpe_dropout > 0:
+    cached_features_file = os.path.join(
+      input_dir,
+      "cached_{}_{}_{}_{}_bped{}".format(
+        "dev" if evaluate else "train",
+        list(filter(None, model_name.split("/"))).pop(),
+        str(args.max_seq_length),
+        str(language),
+        str(bpe_dropout)
+      ),
+    )
+  else:
+    cached_features_file = os.path.join(
+      input_dir,
+      "cached_{}_{}_{}_{}".format(
+        "dev" if evaluate else "train",
+        list(filter(None, model_name.split("/"))).pop(),
+        str(args.max_seq_length),
+        str(language)
+      ),
+    )
+
+  # Init features and dataset from cache if it exists
+  logger.info("Creating features from dataset file at %s", input_dir)
+
+  if not args.data_dir and ((evaluate and not args.predict_file) or (not evaluate and not args.train_file)):
+    try:
+      import tensorflow_datasets as tfds
+    except ImportError:
+      raise ImportError("If not data_dir is specified, tensorflow_datasets needs to be installed.")
+
+    if args.version_2_with_negative:
+      logger.warn("tensorflow_datasets does not handle version 2 of SQuAD.")
+
+    tfds_examples = tfds.load("squad")
+    examples = SquadV1Processor().get_examples_from_dataset(tfds_examples, evaluate=evaluate, language=language)
+  else:
+    processor = SquadV2Processor() if args.version_2_with_negative else SquadV1Processor()
+    if evaluate:
+      examples = processor.get_dev_examples(args.data_dir, filename=args.predict_file, language=language)
+    else:
+      examples = processor.get_train_examples(args.data_dir, filename=args.train_file, language=language)
+
+  features, dataset = squad_convert_examples_to_features(
+    examples=examples,
+    tokenizer=tokenizer,
+    max_seq_length=args.max_seq_length,
+    doc_stride=args.doc_stride,
+    max_query_length=args.max_query_length,
+    is_training=not evaluate,
+    return_dataset="pt",
+    threads=args.threads,
+    lang2id=lang2id,
+    bpe_dropout=bpe_dropout
+  )
+
+  if args.local_rank == 0 and not evaluate:
+    # Make sure only the first process in distributed training process the dataset, and the others will use the cache
+    torch.distributed.barrier()
+
+  if output_examples:
+    return dataset, examples, features
+  return dataset
+
 
 def main():
   parser = argparse.ArgumentParser()
@@ -771,6 +856,8 @@ def main():
   parser.add_argument("--kl_t_scale_grad", default=0, type=int, help="1 if multiply kl loss by t square")
   parser.add_argument("--kl_stop_grad", default=0, type=int, help="1 if stop gradient to target")
 
+  parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
+  parser.add_argument("--resample_both_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   args = parser.parse_args()
 
   if (
@@ -876,7 +963,7 @@ def main():
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False, language=args.train_lang, lang2id=lang2id)
     dropped_train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False, language=args.train_lang, lang2id=lang2id, bpe_dropout=args.bpe_dropout)
-    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer)
+    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=lang2id)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Save the trained model and the tokenizer

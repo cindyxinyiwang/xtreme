@@ -199,6 +199,11 @@ def train(args, train_dataset, model, tokenizer):
   set_seed(args)
 
   for _ in train_iterator:
+    if args.resample_dataset:
+      logger.info("Resample dataset for training....")
+      train_dataset = load_examples(args, tokenizer, evaluate=False, output_examples=False, language=args.train_lang, lang2id=lang2id, bpe_dropout=args.bpe_dropout)
+      train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+      train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, batch in enumerate(epoch_iterator):
 
@@ -702,6 +707,7 @@ def main():
 
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--bpe_dropout", type=float, default=0, help="wait N times of decreasing dev score before early stop during training")
+  parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   args = parser.parse_args()
 
   if (

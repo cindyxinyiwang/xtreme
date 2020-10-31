@@ -186,6 +186,13 @@ def train(args, train_dataset, model, tokenizer, lang2id=None):
   )
   set_seed(args)  # Added here for reproductibility
   for _ in train_iterator:
+    if args.resample_dataset:
+      logger.info("Resample dataset for training....")
+      train_dataset = load_examples(args, tokenizer, evaluate=False, language=args.train_lang, lang2id=lang2id, bpe_drop=args.bpe_dropout)
+      train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+      train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
+
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, batch in enumerate(epoch_iterator):
       # Skip past any already trained steps if resuming training
@@ -493,6 +500,94 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
   return dataset
 
 
+def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0):
+  # Make sure only the first process in distributed training process the 
+  # dataset, and the others will use the cache
+  if args.local_rank not in [-1, 0] and not evaluate:
+    torch.distributed.barrier()
+
+  processor = PROCESSORS[task]()
+  output_mode = "classification"
+  # Load data features from cache or dataset file
+  lc = '_lc' if args.do_lower_case else ''
+  assert not evaluate
+  assert bpe_drop > 0
+  if bpe_drop > 0:
+    cached_features_file = os.path.join(
+      args.data_dir,
+      "cached_{}_{}_{}_{}_{}{}_drop{}".format(
+        split,
+        list(filter(None, args.model_name_or_path.split("/"))).pop(),
+        str(args.max_seq_length),
+        str(task),
+        str(language),
+        lc,
+        str(bpe_drop),
+      ),
+    )
+  else:
+    cached_features_file = os.path.join(
+      args.data_dir,
+      "cached_{}_{}_{}_{}_{}{}".format(
+        split,
+        list(filter(None, args.model_name_or_path.split("/"))).pop(),
+        str(args.max_seq_length),
+        str(task),
+        str(language),
+        lc,
+      ),
+    )
+  logger.info("Creating features from dataset file at %s", args.data_dir)
+  label_list = processor.get_labels()
+  if split == 'train':
+    examples = processor.get_train_examples(args.data_dir, language)
+  elif split == 'translate-train':
+    examples = processor.get_translate_train_examples(args.data_dir, language)
+  elif split == 'translate-test':
+    examples = processor.get_translate_test_examples(args.data_dir, language)
+  elif split == 'dev':
+    examples = processor.get_dev_examples(args.data_dir, language)
+  elif split == 'pseudo_test':
+    examples = processor.get_pseudo_test_examples(args.data_dir, language)
+  else:
+    examples = processor.get_test_examples(args.data_dir, language)
+
+  features = convert_examples_to_features(
+    examples,
+    tokenizer,
+    label_list=label_list,
+    max_length=args.max_seq_length,
+    output_mode=output_mode,
+    pad_on_left=False,
+    pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+    pad_token_segment_id=0,
+    lang2id=lang2id,
+    bpe_dropout=bpe_drop,
+  )
+
+  # Make sure only the first process in distributed training process the 
+  # dataset, and the others will use the cache
+  if args.local_rank == 0 and not evaluate:
+    torch.distributed.barrier()  
+
+  # Convert to Tensors and build dataset
+  all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+  all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
+  all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
+  if output_mode == "classification":
+    all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
+  else:
+    raise ValueError("No other `output_mode` for {}.".format(args.task_name))
+
+  if args.model_type == 'xlm':
+    all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
+    dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels, all_langs)
+  else:  
+    dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
+  return dataset
+
+
+
 def main():
   parser = argparse.ArgumentParser()
 
@@ -643,6 +738,7 @@ def main():
   parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
   parser.add_argument("--tau", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--bpe_dropout", type=float, default=0, help="wait N times of decreasing dev score before early stop during training")
+  parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   args = parser.parse_args()
 
   if (
