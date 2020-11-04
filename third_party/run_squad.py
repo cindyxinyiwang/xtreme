@@ -376,11 +376,11 @@ def evaluate(args, model, tokenizer, prefix="", language='en', lang2id=None):
   logger.info("  Evaluation done in total %f secs (%f sec per example)", evalTime, evalTime / len(dataset))
 
   # Compute predictions
-  output_prediction_file = os.path.join(args.output_dir, "predictions_{}_{}.json".format(language, prefix))
-  output_nbest_file = os.path.join(args.output_dir, "nbest_predictions_{}_{}.json".format(language, prefix))
+  output_prediction_file = os.path.join(args.output_dir, "predictions_{}_{}.json".format(language, prefix+str(args.do_final)))
+  output_nbest_file = os.path.join(args.output_dir, "nbest_predictions_{}_{}.json".format(language, prefix+str(args.do_final)))
 
   if args.version_2_with_negative:
-    output_null_log_odds_file = os.path.join(args.output_dir, "null_odds_{}.json".format(prefix))
+    output_null_log_odds_file = os.path.join(args.output_dir, "null_odds_{}.json".format(prefix+str(args.do_final)))
   else:
     output_null_log_odds_file = None
 
@@ -419,8 +419,9 @@ def evaluate(args, model, tokenizer, prefix="", language='en', lang2id=None):
       args.version_2_with_negative,
       args.null_score_diff_threshold,
       tokenizer,
-      do_final_text=(language != 'zh'),
+      do_final_text=((language != 'zh') or args.do_final),
     )
+    #  do_final_text=True,
 
   # Compute the F1 and exact scores.
   results = squad_evaluate(examples, predictions)
@@ -708,6 +709,7 @@ def main():
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--bpe_dropout", type=float, default=0, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
+  parser.add_argument("--do_final", default=0, type=int, help="set to 1 if execute get_final_text for Chinese")
   args = parser.parse_args()
 
   if (
@@ -899,12 +901,12 @@ def main():
 
       result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
       results.update(result)
-      result_writer.write("**************\n")
-      result_writer.write("language = {}\n".format(args.eval_lang))
-      for k, v in result.items():
-        if global_step:
-          result_writer.write("step = {}\n".format(global_step))
-        result_writer.write("{} = {}\n".format(k, v))
+      #result_writer.write("**************\n")
+      #result_writer.write("language = {}\n".format(args.eval_lang))
+      #for k, v in result.items():
+      #  if global_step:
+      #    result_writer.write("step = {}\n".format(global_step))
+      #  result_writer.write("{} = {}\n".format(k, v))
 
   logger.info("Results: {}".format(results))
 

@@ -34,6 +34,7 @@ mkdir -p "${PRED_DIR}"
 
 if [ $TGT == 'xquad' ]; then
   langs=( en es de el ru tr ar vi th zh hi )
+  #langs=( zh )
 elif [ $TGT == 'mlqa' ]; then
   langs=( en es de ar hi vi zh )
   #langs=( zh )
@@ -68,7 +69,20 @@ for lang in ${langs[@]}; do
     --eval_lang ${lang} \
     --predict_file "${TEST_FILE}" \
     --log_file ${MODEL_PATH}/train.log \
+    --do_final 0 \
     --output_dir "${PRED_DIR}"
+  python third_party/run_squad.py \
+    --data_dir $DIR \
+    --model_name ${MODEL} \
+    --model_type ${MODEL_TYPE} \
+    --model_name_or_path ${MODEL_PATH} \
+    --do_test \
+    --eval_lang ${lang} \
+    --predict_file "${TEST_FILE}" \
+    --log_file ${MODEL_PATH}/train.log \
+    --do_final 1 \
+    --output_dir "${PRED_DIR}"
+
     #--output_dir "${PRED_DIR}" &> /dev/null
 done
 

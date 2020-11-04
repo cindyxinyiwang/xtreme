@@ -143,6 +143,7 @@ if __name__ == '__main__':
     parser.add_argument('prediction_file', help='Prediction File')
     parser.add_argument('answer_language', help='Language code of answer language')
     parser.add_argument('prediction_dir', help='Directory for prediction')
+    parser.add_argument('do_final', type=int, default=3, help='Directory for prediction')
 
     args = parser.parse_args()
     with open(args.dataset_file) as dataset_file:
@@ -156,11 +157,37 @@ if __name__ == '__main__':
         predictions = json.load(prediction_file)
     result = evaluate(dataset, predictions, args.answer_language)
     print(json.dumps(result))
-    result_file = os.path.join(args.prediction_dir, "mlqa_test_results.txt")
-    with open(result_file, 'a') as result_file:
-      result_file.write("**************\n")
-      result_file.write("language = {}\n".format(args.answer_language))
-      for k, v in result.items():
-        result_file.write("{} = {}\n".format(k, v))
+
+
+    if args.do_final == 3:
+        result_file = os.path.join(args.prediction_dir, "mlqa_test_results_0.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+
+        result_file = os.path.join(args.prediction_dir, "mlqa_test_results_1.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+    elif args.do_final == 1:
+        result_file = os.path.join(args.prediction_dir, "mlqa_test_results_1.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+    elif args.do_final == 0:
+        result_file = os.path.join(args.prediction_dir, "mlqa_test_results_0.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+    else:
+        print("Warning! not writing to file")
 
 

@@ -21,7 +21,7 @@ import re
 import argparse
 import json
 import sys
-
+import os
 
 def normalize_answer(s):
     """Lower text and remove punctuation, articles and extra whitespace."""
@@ -96,6 +96,9 @@ if __name__ == '__main__':
         description='Evaluation for SQuAD ' + expected_version)
     parser.add_argument('dataset_file', help='Dataset file')
     parser.add_argument('prediction_file', help='Prediction File')
+    parser.add_argument('answer_language', help='Language code of answer language')
+    parser.add_argument('prediction_dir', help='Directory for prediction')
+    parser.add_argument('do_final', type=int, default=3, help='Directory for prediction')
     args = parser.parse_args()
     with open(args.dataset_file) as dataset_file:
         dataset_json = json.load(dataset_file)
@@ -106,4 +109,37 @@ if __name__ == '__main__':
         dataset = dataset_json['data']
     with open(args.prediction_file) as prediction_file:
         predictions = json.load(prediction_file)
-    print(json.dumps(evaluate(dataset, predictions)))
+    result = evaluate(dataset, predictions)
+    print(json.dumps(result))
+
+    if args.do_final == 3:
+        result_file = os.path.join(args.prediction_dir, "xquad_test_results_0.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+
+        result_file = os.path.join(args.prediction_dir, "xquad_test_results_1.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+    elif args.do_final == 1:
+        result_file = os.path.join(args.prediction_dir, "xquad_test_results_1.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+    elif args.do_final == 0:
+        result_file = os.path.join(args.prediction_dir, "xquad_test_results_0.txt")
+        with open(result_file, 'a') as result_file:
+          result_file.write("**************\n")
+          result_file.write("language = {}\n".format(args.answer_language))
+          for k, v in result.items():
+            result_file.write("{} = {}\n".format(k, v))
+    else:
+        print("Warning! not writing to file")
+

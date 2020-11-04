@@ -65,13 +65,13 @@ def classify_results(filename):
   #print(pd.DataFrame(df, columns=langs).mean(axis=0).mean())
   df.to_csv(filename+".csv")
 
-def qa_results(filename):
+def qa_results(filename, do_final=0):
   seeded_results = []
   seeded_exact_results = []
   for seed in seeds:
     results = {}
     exact_results = {}
-    c_f = filename + "_s{}/predictions/xquad/test_results.txt".format(seed)
+    c_f = filename + "_s{}/predictions/xquad/xquad_test_results_{}.txt".format(seed, do_final)
     if os.path.exists(c_f):
         with open(c_f, 'r') as f:
             for line in f:
@@ -100,14 +100,14 @@ def qa_results(filename):
   
   #print(df.mean(axis=1))
   #print(pd.DataFrame(df, columns=langs).mean(axis=0).mean())
-  combined_df.to_csv(filename+"_xquad.csv")
+  combined_df.to_csv(filename+"_xquad_{}.csv".format(do_final))
 
   seeded_results = []
   seeded_exact_results = []
   for seed in seeds:
     results = {}
     exact_results = {}
-    c_f = filename + "_s{}/predictions/mlqa/mlqa_test_results.txt".format(seed)
+    c_f = filename + "_s{}/predictions/mlqa/mlqa_test_results_{}.txt".format(seed, do_final)
     if os.path.exists(c_f):
         with open(c_f, 'r') as f:
             for line in f:
@@ -136,7 +136,7 @@ def qa_results(filename):
   
   #print(df.mean(axis=1))
   #print(pd.DataFrame(df, columns=langs).mean(axis=0).mean())
-  combined_df.to_csv(filename+"_mlqa.csv")
+  combined_df.to_csv(filename+"_mlqa_{}.csv".format(do_final))
 
 
 
