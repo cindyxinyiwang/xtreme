@@ -65,7 +65,7 @@ def classify_results(filename):
   #print(pd.DataFrame(df, columns=langs).mean(axis=0).mean())
   df.to_csv(filename+".csv")
 
-def qa_results(filename, do_final=0):
+def qa_results(filename, do_final=1):
   seeded_results = []
   seeded_exact_results = []
   for seed in seeds:
