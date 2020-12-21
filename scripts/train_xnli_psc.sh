@@ -1,4 +1,10 @@
 #!/bin/bash
+
+#SBATCH --partition=GPU-AI  
+#SBATCH --nodes=1                                                                
+#SBATCH --gres=gpu:volta16:2                                                             
+#SBATCH --time=48:00:00
+
 # Copyright 2020 Google and DeepMind.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,17 +18,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-#SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --time=0
-#SBATCH --mem=15GB
-
 REPO=$PWD
 GPU=${1:-0}
 MODEL=${2:-bert-base-multilingual-cased}
-DATA_DIR=${3:-"$REPO/download/"}
-OUT_DIR=${4:-"$REPO/outputs/"}
+#MODEL=${2:-xlm-roberta-large}
+DATA_DIR=${3:-"$SCRATCH/download/"}
+OUT_DIR=${4:-"$SCRATCH/outputs/"}
 
 #export CUDA_VISIBLE_DEVICES=$GPU
 
@@ -45,11 +46,13 @@ elif [ $MODEL == "xlm-roberta-large" ] || [ $MODEL == "xlm-roberta-base" ]; then
 fi
 
 if [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-roberta-large" ]; then
-  BATCH_SIZE=2
-  GRAD_ACC=16
+  BATCH_SIZE=4
+  #GRAD_ACC=16
+  GRAD_ACC=4
 else
   BATCH_SIZE=8
-  GRAD_ACC=4
+  #GRAD_ACC=4
+  GRAD_ACC=2
 fi
 
 for SEED in 1;
@@ -57,13 +60,15 @@ do
 SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}_bped${BPE_DROP}_s${SEED}/"
 mkdir -p $SAVE_DIR
 
-python $PWD/third_party/run_classify.py \
+#python $PWD/third_party/run_classify.py \
+#  --eval_test_set $LC
+python -m torch.distributed.launch --nproc_per_node 2 --master_port=$RANDOM $PWD/third_party/run_classify.py \
+  --do_train \
+  --do_eval \
   --model_type $MODEL_TYPE \
   --model_name_or_path $MODEL \
   --train_language $TRAIN_LANG \
   --task_name $TASK \
-  --do_train \
-  --do_eval \
   --do_predict \
   --data_dir $DATA_DIR/${TASK} \
   --gradient_accumulation_steps $GRAD_ACC \
@@ -79,6 +84,5 @@ python $PWD/third_party/run_classify.py \
   --save_only_best_checkpoint \
   --overwrite_output_dir \
   --seed $SEED \
-  --bpe_dropout $BPE_DROP \
-  --eval_test_set $LC
+  --bpe_dropout $BPE_DROP 
 done

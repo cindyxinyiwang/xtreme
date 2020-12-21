@@ -12,28 +12,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 #SBATCH --partition=GPU-AI  
 #SBATCH --nodes=1                                                                
 #SBATCH --gres=gpu:volta16:1                                                             
 #SBATCH --time=48:00:00
 
-
 REPO=$PWD
-#MODEL=${1:-bert-base-multilingual-cased}
-MODEL=${1:-xlm-roberta-base}
-GPU=${2:-0}
+GPU=${1:-0}
+#MODEL=${2:-bert-base-multilingual-cased}
+MODEL=${2:-xlm-roberta-large}
 DATA_DIR=${3:-"$SCRATCH/download/"}
 OUT_DIR=${4:-"$SCRATCH/outputs/"}
 
 #export CUDA_VISIBLE_DEVICES=$GPU
-
-TASK='pawsx'
+TASK='panx'
+LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
+TRAIN_LANGS="en"
+NUM_EPOCHS=10
+MAX_LENGTH=128
+OPTIM='Adam'
 LR=2e-5
-EPOCH=5
-MAXL=128
-LANGS="de,en,es,fr,ja,ko,zh"
-BPE_DROP=0
+BPE_DROP=0.2
+RWEIGHT=0.5
+DWEIGHT=0.5 
+RESAMPLE=0
+KL=1
+
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -52,35 +56,41 @@ else
   GRAD_ACC=4
 fi
 
-for SEED in 1 6;
-do
-SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_bped${BPE_DROP}_s${SEED}/"
-mkdir -p $SAVE_DIR
+DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-python $PWD/third_party/run_classify.py \
-  --model_type $MODEL_TYPE \
-  --model_name_or_path $MODEL \
-  --train_language en \
-  --task_name $TASK \
+for SEED in 1;
+do
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_mbped${BPE_DROP}_kl${KL}_rloss${RWEIGHT}_dloss${DWEIGHT}_resample${RESAMPLE}_s${SEED}/"
+
+mkdir -p $OUTPUT_DIR
+python $REPO/third_party/run_mv_tag.py \
   --do_train \
   --do_eval \
-  --do_predict \
-  --train_split train \
-  --test_split test \
-  --data_dir $DATA_DIR/$TASK/ \
+  --data_dir $DATA_DIR \
+  --model_type $MODEL_TYPE \
+  --labels $DATA_DIR/labels.txt \
+  --model_name_or_path $MODEL \
+  --output_dir $OUTPUT_DIR \
+  --max_seq_length  $MAX_LENGTH \
+  --num_train_epochs $NUM_EPOCHS \
   --gradient_accumulation_steps $GRAD_ACC \
-  --save_steps 200 \
   --per_gpu_train_batch_size $BATCH_SIZE \
-  --learning_rate $LR \
-  --num_train_epochs $EPOCH \
-  --max_seq_length $MAXL \
-  --output_dir $SAVE_DIR \
-  --eval_all_checkpoints \
-  --overwrite_output_dir \
-  --log_file 'train.log' \
-  --predict_languages $LANGS \
-  --save_only_best_checkpoint $LC \
+  --per_gpu_eval_batch_size 32 \
+  --save_steps 1000 \
   --seed $SEED \
+  --learning_rate $LR \
+  --do_predict \
+  --predict_langs $LANGS \
+  --train_langs $TRAIN_LANGS \
+  --log_file $OUTPUT_DIR/train.log \
+  --eval_all_checkpoints \
+  --eval_patience -1 \
+  --overwrite_output_dir \
+  --optimizer $OPTIM \
   --bpe_dropout $BPE_DROP \
-  --eval_test_set 
+  --kl_weight $KL \
+  --resample_dataset $RESAMPLE \
+  --reg_loss_weight $RWEIGHT \
+  --drop_loss_weight $DWEIGHT \
+  --save_only_best_checkpoint $LC
 done

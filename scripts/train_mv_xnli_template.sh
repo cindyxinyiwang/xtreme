@@ -1,4 +1,9 @@
 #!/bin/bash
+#SBATCH --partition=GPU-AI  
+#SBATCH --nodes=1                                                                
+#SBATCH --gres=gpu:volta16:1                                                             
+#SBATCH --time=48:00:00
+
 # Copyright 2020 Google and DeepMind.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,16 +18,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --time=0
-#SBATCH --mem=15GB
+SEED=SETSEED
+BPE_DROP=SETBPEDROP
+KL=SETKL
 
 REPO=$PWD
 GPU=${1:-0}
 MODEL=${2:-bert-base-multilingual-cased}
-DATA_DIR=${3:-"$REPO/download/"}
-OUT_DIR=${4:-"$REPO/outputs/"}
+DATA_DIR=${3:-"$SCRATCH/download/"}
+OUT_DIR=${4:-"$SCRATCH/outputs/"}
 
 #export CUDA_VISIBLE_DEVICES=$GPU
 
@@ -32,9 +36,13 @@ EPOCH=5
 MAXL=128
 TRAIN_LANG="en"
 LANGS="ar,bg,de,el,en,es,fr,hi,ru,sw,th,tr,ur,vi,zh"
-LC=""
-BPE_DROP=0.1
+KL_T=1
+KL_TB=0
+KL_TG=0
+KL_SG=0
 
+
+LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
 elif [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-mlm-tlm-xnli15-1024" ]; then
@@ -52,12 +60,11 @@ else
   GRAD_ACC=4
 fi
 
-for SEED in 1;
-do
-SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}_bped${BPE_DROP}_s${SEED}/"
+SAVE_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_train${TRAIN_LANG}_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_kltb${KL_TB}_kltg${KL_TG}_klsg${KL_SG}_s${SEED}/"
 mkdir -p $SAVE_DIR
 
-python $PWD/third_party/run_classify.py \
+#python -m torch.distributed.launch --nproc_per_node 2 --master_port=$RANDOM \
+python $PWD/third_party/run_mv_classify.py \
   --model_type $MODEL_TYPE \
   --model_name_or_path $MODEL \
   --train_language $TRAIN_LANG \
@@ -80,5 +87,9 @@ python $PWD/third_party/run_classify.py \
   --overwrite_output_dir \
   --seed $SEED \
   --bpe_dropout $BPE_DROP \
+  --kl_weight $KL \
+  --kl_t $KL_T \
+  --kl_t_scale_both $KL_TB \
+  --kl_t_scale_grad $KL_TG \
+  --kl_stop_grad $KL_SG \
   --eval_test_set $LC
-done

@@ -14,7 +14,8 @@
 # limitations under the License.
 
 REPO=$PWD
-DIR=$REPO/download/
+#DIR=$REPO/download/
+DIR=$SCRATCH/download/
 mkdir -p $DIR
 
 # download XNLI dataset
@@ -59,10 +60,11 @@ function download_udpos {
     out_dir=$base_dir/conll/
     mkdir -p $out_dir
     cd $base_dir
-    curl -s --remote-name-all https://lindat.mff.cuni.cz/repository/xmlui/bitstream/handle/11234/1-3105/ud-treebanks-v2.5.tgz
-    tar -xzf $base_dir/ud-treebanks-v2.5.tgz
+    #curl -s --remote-name-all https://lindat.mff.cuni.cz/repository/xmlui/bitstream/handle/11234/1-3105/ud-treebanks-v2.5.tgz
+    #tar -xzf $base_dir/ud-treebanks-v2.5.tgz
 
-    langs=(af ar bg de el en es et eu fa fi fr he hi hu id it ja kk ko mr nl pt ru ta te th tl tr ur vi yo zh)
+    #langs=(af ar bg de el en es et eu fa fi fr he hi hu id it ja kk ko mr nl pt ru ta te th tl tr ur vi yo zh fo is olo bh as)
+    langs=(grc fo is olo bho as)
     for x in $base_dir/ud-treebanks-v2.5/*/*.conllu; do
         file="$(basename $x)"
         IFS='_' read -r -a array <<< "$file"
@@ -81,7 +83,7 @@ function download_udpos {
     done
 
     python $REPO/utils_preprocess.py --data_dir $out_dir/ --output_dir $DIR/udpos/ --task  udpos
-    rm -rf $out_dir ud-treebanks-v2.tgz $DIR/udpos-tmp
+    #rm -rf $out_dir ud-treebanks-v2.tgz $DIR/udpos-tmp
     echo "Successfully downloaded data at $DIR/udpos" >> $DIR/download.log
 }
 
@@ -192,7 +194,7 @@ function download_tydiqa {
 #download_bucc18
 #download_squad
 #download_xquad
-download_mlqa
+#download_mlqa
 #download_tydiqa
-#download_udpos
+download_udpos
 #download_panx
