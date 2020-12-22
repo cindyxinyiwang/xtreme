@@ -36,7 +36,6 @@ from tqdm import tqdm, trange
 from utils_tag import convert_examples_to_features
 from utils_tag import get_labels
 from utils_tag import read_examples_from_file
-from RecAdam import RecAdam, anneal_function
 import utils
 
 from transformers import (
@@ -66,7 +65,6 @@ ALL_MODELS = sum(
 
 MODEL_CLASSES = {
   "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
-  "xlm": (XLMConfig, XLMForTokenClassification, XLMTokenizer),
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
 
@@ -89,10 +87,10 @@ class ConcatDataset(torch.utils.data.Dataset):
     return min(len(d) for d in self.datasets)
 
 
-def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None):
+def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
   """Train the model."""
-  #if args.local_rank in [-1, 0]:
-  #  tb_writer = SummaryWriter()
+  if args.local_rank in [-1, 0]:
+    tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
   concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
@@ -108,54 +106,12 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   # Prepare optimizer and schedule (linear warmup and decay)
   no_decay = ["bias", "LayerNorm.weight"]
-  if args.optimizer == 'Adam':
-    optimizer_grouped_parameters = [
-      {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-       "weight_decay": args.weight_decay},
-      {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
-    ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-  elif args.optimizer == 'RecAdam':
-        # Prepare for the grouped parameters for RecAdam optimizer.
-        # Since the classifier layer is not pretrained, it is not penalized during optimization.
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in model.named_parameters() if
-                           not any(nd in n for nd in no_decay) and args.model_type in n],
-                "weight_decay": args.weight_decay,
-                "anneal_w": args.recadam_anneal_w,
-                "pretrain_params": [p_p for p_n, p_p in pretrained_model.named_parameters() if
-                                    not any(nd in p_n for nd in no_decay) and args.model_type in p_n]
-            },
-            {
-                "params": [p for n, p in model.named_parameters() if
-                           not any(nd in n for nd in no_decay) and args.model_type not in n],
-                "weight_decay": args.weight_decay,
-                "anneal_w": 0.0,
-                "pretrain_params": [p_p for p_n, p_p in pretrained_model.named_parameters() if
-                                    not any(nd in p_n for nd in no_decay) and args.model_type not in p_n]
-            },
-            {
-                "params": [p for n, p in model.named_parameters() if
-                           any(nd in n for nd in no_decay) and args.model_type in n],
-                "weight_decay": 0.0,
-                "anneal_w": args.recadam_anneal_w,
-                "pretrain_params": [p_p for p_n, p_p in pretrained_model.named_parameters() if
-                                    any(nd in p_n for nd in no_decay) and args.model_type in p_n]
-            },
-            {
-                "params": [p for n, p in model.named_parameters() if
-                           any(nd in n for nd in no_decay) and args.model_type not in n],
-                "weight_decay": 0.0,
-                "anneal_w": 0.0,
-                "pretrain_params": [p_p for p_n, p_p in pretrained_model.named_parameters() if
-                                    any(nd in p_n for nd in no_decay) and args.model_type not in p_n]
-            }
-        ]
-        optimizer = RecAdam(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon,
-                            anneal_fun=args.recadam_anneal_fun, anneal_k=args.recadam_anneal_k,
-                            anneal_t0=args.recadam_anneal_t0, pretrain_cof=args.recadam_pretrain_cof, update_pretrained_epoch=args.update_pretrained_epoch)
-
+  optimizer_grouped_parameters = [
+    {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+     "weight_decay": args.weight_decay},
+    {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
+  ]
+  optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
   if args.fp16:
     try:
@@ -196,16 +152,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   cur_epoch = 0
   for _ in train_iterator:
-    if args.resample_dataset:
-      logger.info("Resample dataset for training....")
-      if args.resample_both_dataset:
-        logger.info("Resample both dataset for training....")
-        train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id)
-      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id)
-      concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
-      train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
-      train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
     if cur_epoch == args.update_pretrained_epoch and args.optimizer == 'RecAdam':
@@ -215,11 +161,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       model.train()
       batch, dropped_batch = concat_batch
       batch = tuple(t.to(args.device) for t in batch if t is not None)
-      input_ids = batch[0]
-      inputs = {"input_ids": input_ids,
+      inputs = {"input_ids": batch[0],
             "attention_mask": batch[1],
             "labels": batch[3]}
-      #      "reduction": "none"}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -234,11 +178,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       logits = outputs[-1]
 
       dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-      input_ids = dropped_batch[0]
-      dropped_inputs = {"input_ids": input_ids,
+      dropped_inputs = {"input_ids": dropped_batch[0],
             "attention_mask": dropped_batch[1],
             "labels": dropped_batch[3]}
-      #      "reduction": "none"}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -254,24 +196,14 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
-        if args.kl_stop_grad:
-          prob = prob.detach()
-        if args.kl_t_scale_both:
-          kl_t = args.kl_t
-        else: 
-          kl_t = 1
-        if args.kl_t_scale_grad:
-          kl_loss_scale = kl_t * args.kl_t
-        else:
-          kl_loss_scale = 1
-        dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits[dropped_kept_label_mask]/kl_t, dim=1)
+        dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits[dropped_kept_label_mask], dim=1)
         if len(prob) > len(dropped_log_prob):
           prob = prob[:len(dropped_log_prob)]
         elif len(prob) < len(dropped_log_prob):
           dropped_log_prob = dropped_log_prob[:len(prob)]
         kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
         kl = kl_loss(dropped_log_prob, prob)
-        loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl*kl_loss_scale
+        loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl
       else:
         loss = 0.5*loss + 0.5*dropped_loss
       if args.n_gpu > 1:
@@ -303,10 +235,10 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           if args.local_rank == -1 and args.evaluate_during_training:
             # Only evaluate on single GPU otherwise metrics may not average well
             results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.train_langs, lang2id=lang2id)
-            #for key, value in results.items():
-            #  tb_writer.add_scalar("eval_{}".format(key), value, global_step)
-          #tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-          #tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
+            for key, value in results.items():
+              tb_writer.add_scalar("eval_{}".format(key), value, global_step)
+          tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
+          tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
           logging_loss = tr_loss
 
         if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
@@ -334,8 +266,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
                 logger.info("early stop! patience={}".format(patience))
                 epoch_iterator.close()
                 train_iterator.close()
-                #if args.local_rank in [-1, 0]:
-                #  tb_writer.close()
+                if args.local_rank in [-1, 0]:
+                  tb_writer.close()
                 return global_step, tr_loss / global_step
           else:
             # Save model checkpoint
@@ -355,8 +287,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       train_iterator.close()
       break
 
-  #if args.local_rank in [-1, 0]:
-  #  tb_writer.close()
+  if args.local_rank in [-1, 0]:
+    tb_writer.close()
 
   return global_step, tr_loss / global_step
 
@@ -672,48 +604,12 @@ def main():
             help="The languages in the training sets.")
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--eval_patience", type=int, default=-1, help="wait N times of decreasing dev score before early stop during training")
-
-  ## SDE parameters
-  parser.add_argument("--max_ngram_size", default=10, type=int,
-            help="ngram size for each word")
-  parser.add_argument("--bpe_segment", type=int, default=1, help="whether to segment by BPE or by word")
-  parser.add_argument("--sde_latent", type=int, default=5000, help="sde latent emb size")
-  parser.add_argument("--use_sde_embed", action="store_true")
-  parser.add_argument("--add_sde_embed", action="store_true")
-
-  parser.add_argument("--tau", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
-
-  parser.add_argument("--attention_t", type=float, default=1, help="wait N times of decreasing dev score before early stop during training")
-
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
+
   parser.add_argument("--bpe_dropout", default=0, type=float)
-  parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
-  parser.add_argument("--resample_both_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
   parser.add_argument("--fix_class", action='store_true')
-  parser.add_argument("--kl_t_scale_both", default=0, type=int, help="1 if scale both logits by t")
-  parser.add_argument("--kl_t_scale_grad", default=0, type=int, help="1 if multiply kl loss by t square")
-  parser.add_argument("--kl_stop_grad", default=0, type=int, help="1 if stop gradient to target")
-  # RecAdam parameters
-  parser.add_argument("--optimizer", type=str, default="RecAdam", choices=["Adam", "RecAdam"],
-                      help="Choose the optimizer to use. Default RecAdam.")
-  parser.add_argument("--recadam_anneal_fun", type=str, default='sigmoid', choices=["sigmoid", "linear", 'constant'],
-                      help="the type of annealing function in RecAdam. Default sigmoid")
-  parser.add_argument("--recadam_anneal_k", type=float, default=0.5, help="k for the annealing function in RecAdam.")
-  parser.add_argument("--recadam_anneal_t0", type=int, default=250, help="t0 for the annealing function in RecAdam.")
-  parser.add_argument("--recadam_anneal_w", type=float, default=1.0,
-                      help="Weight for the annealing function in RecAdam. Default 1.0.")
-  parser.add_argument("--recadam_pretrain_cof", type=float, default=5000.0,
-                      help="Coefficient of the quadratic penalty in RecAdam. Default 5000.0.")
-
-  parser.add_argument("--logging_Euclid_dist", action="store_true",
-                      help="Whether to log the Euclidean distance between the pretrained model and fine-tuning model")
-  parser.add_argument("--start_from_pretrain", action="store_true",
-                      help="Whether to initialize the model with pretrained parameters")
-
-  parser.add_argument("--albert_dropout", default=0.0, type=float,
-                      help="The dropout rate for the ALBERT model")
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
@@ -772,26 +668,11 @@ def main():
   config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
   config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                       num_labels=num_labels,
-                      use_sde_embed=args.use_sde_embed,
-                      add_sde_embed=args.add_sde_embed,
-                      sde_latent=args.sde_latent,
-                      attention_t=args.attention_t,
                       fix_class=args.fix_class,
                       cache_dir=args.cache_dir if args.cache_dir else None)
   tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                         do_lower_case=args.do_lower_case,
                         cache_dir=args.cache_dir if args.cache_dir else None)
-
-  if args.optimizer == 'RecAdam':
-    pretrained_model = model_class.from_pretrained(
-            args.model_name_or_path,
-            from_tf=bool(".ckpt" in args.model_name_or_path),
-            config=config,
-            cache_dir=args.cache_dir if args.cache_dir else None,
-        )
-    pretrained_model.to(args.device)
-  else:
-    pretrained_model = None
 
   if args.init_checkpoint:
     logger.info("loading from init_checkpoint={}".format(args.init_checkpoint))
@@ -817,7 +698,7 @@ def main():
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
     dropped_train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
-    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model)
+    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,

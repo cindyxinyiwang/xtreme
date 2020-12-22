@@ -172,10 +172,11 @@ def udpos_tokenize_preprocess(args):
     out_dir = os.path.join(args.output_dir, lang)
     if not os.path.exists(out_dir):
       os.makedirs(out_dir)
-    if lang == 'en':
-      files = ['dev', 'test', 'train']
-    else:
-      files = ['dev', 'test']
+    #if lang == 'en':
+    #  files = ['dev', 'test', 'train']
+    #else:
+    #  files = ['dev', 'test']
+    files = ['dev', 'test', 'train']
     for file in files:
       infile = os.path.join(args.data_dir, "{}-{}.tsv".format(file, lang))
       outfile = os.path.join(out_dir, "{}.{}".format(file, args.model_name_or_path))
@@ -265,7 +266,9 @@ def udpos_preprocess(args):
   if not os.path.exists(args.output_dir):
     os.makedirs(args.output_dir)
 
-  languages = 'af ar bg de el en es et eu fa fi fr he hi hu id it ja kk ko mr nl pt ru ta te th tl tr ur vi yo zh'.split(' ')
+  #langs=(af ar bg de el en es et eu fa fi fr he hi hu id it ja kk ko mr nl pt ru ta te th tl tr ur vi yo zh fo is olo bh as)
+  #languages = 'af ar bg de el en es et eu fa fi fr he hi hu id it ja kk ko mr nl pt ru ta te th tl tr ur vi yo zh fo is olo bho as'.split(' ')
+  languages = 'grc fo is olo bho as'.split(' ')
   for root, dirs, files in os.walk(args.data_dir):
     lg = root.strip().split('/')[-1]
     if root == args.data_dir or lg not in languages:
