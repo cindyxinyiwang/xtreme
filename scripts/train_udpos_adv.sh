@@ -24,7 +24,7 @@ GPU=${2:-0}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
-#export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0
 TASK='udpos'
 #LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
 #TRAIN_LANGS="en"
@@ -34,8 +34,6 @@ NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
 BPE_DROP=0.2
-KL=0.2 
-KL_T=1
 # ran 000,100,111,001
 # to run: 101,011,010,110,
 LC=""
@@ -59,7 +57,7 @@ fi
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
 for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_adv_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_adv_s${SEED}/"
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_mv_tag_adv.py \
   --data_dir $DATA_DIR \
@@ -82,9 +80,6 @@ python $REPO/third_party/run_mv_tag_adv.py \
   --eval_all_checkpoints \
   --overwrite_output_dir \
   --train_langs $TRAIN_LANGS \
-  --bpe_dropout $BPE_DROP \
-  --kl_weight $KL \
-  --kl_t $KL_T \
   --adv-lr 3e-2 \
   --adv-steps 2 \
   --adv-max-norm 0 \
