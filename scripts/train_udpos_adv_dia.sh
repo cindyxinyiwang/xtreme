@@ -50,8 +50,8 @@ if [ $MODEL == "xlm-mlm-100-1280" ] || [ $MODEL == "xlm-roberta-large" ]; then
   BATCH_SIZE=2
   GRAD_ACC=16
 else
-  BATCH_SIZE=1
-  GRAD_ACC=32
+  BATCH_SIZE=4
+  GRAD_ACC=8
 fi
 
 ALR=3e-2
