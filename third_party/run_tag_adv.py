@@ -64,7 +64,7 @@ ALL_MODELS = sum(
 )
 
 MODEL_CLASSES = {
-  "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
+  "bert": (BertConfig, BertForMLMandTokenClassification, BertTokenizer),
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
 
@@ -81,22 +81,23 @@ class ConcatDataset(torch.utils.data.Dataset):
     self.datasets = datasets
 
   def __getitem__(self, i):
-    return tuple(d[i] for d in self.datasets)
+    return tuple(d[i % len(d)] for d in self.datasets)
 
   def __len__(self):
-    return min(len(d) for d in self.datasets)
+    return max(len(d) for d in self.datasets)
 
 
-def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
+def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, dia_dataset=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-  concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+  if dia_dataset is not None:
+    train_dataset = ConcatDataset(train_dataset, dia_dataset)
 
-  train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
-  train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+  train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+  train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
   if args.max_steps > 0:
     t_total = args.max_steps
@@ -111,6 +112,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
      "weight_decay": args.weight_decay},
     {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
   ]
+  params = [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)]
   optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
   if args.fp16:
@@ -132,7 +134,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   # Train!
   logger.info("***** Running training *****")
-  logger.info("  Num examples = %d", len(concat_train_dataset))
+  logger.info("  Num examples = %d", len(train_dataset))
   logger.info("  Num Epochs = %d", args.num_train_epochs)
   logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
   logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
@@ -157,18 +159,14 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
     if cur_epoch == args.update_pretrained_epoch and args.optimizer == 'RecAdam':
       logger.info(" Update pretrained param at epoch {}".format(cur_epoch))
       optimizer.update_pretrained()
-    for step, concat_batch in enumerate(epoch_iterator):
+    for step, batch in enumerate(epoch_iterator):
+      if dia_dataset is not None:
+          batch, dia_batch = batch
       model.train()
-      batch, dropped_batch = concat_batch
       batch = tuple(t.to(args.device) for t in batch if t is not None)
       #inputs = {"input_ids": batch[0],
       inputs = {"attention_mask": batch[1],
             "labels": batch[3]}
-
-      dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-      #dropped_inputs = {"input_ids": dropped_batch[0],
-      dropped_inputs = {"attention_mask": dropped_batch[1],
-            "labels": dropped_batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -197,10 +195,14 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       else:
           delta = torch.zeros_like(embeds_init)
 
+      #params = params + [delta]
+      dp_masks = None
       for astep in range(args.adv_steps):
           delta.requires_grad_()
           inputs["inputs_embeds"] = delta + embeds_init
+          inputs["dp_masks"] = dp_masks 
 
+          #outputs, dp_masks = model(**inputs)
           outputs = model(**inputs)
           loss = outputs[0]
           kept_label_mask = outputs[-2]
@@ -216,14 +218,35 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
-              scaled_loss.backward()
+              scaled_loss.backward(retain_graph=(dia_dataset is not None), create_graph=(dia_dataset is not None))
           else:
-            loss.backward()
+            loss.backward(retain_graph=(dia_dataset is not None), create_graph=(dia_dataset is not None))
 
           if astep == args.adv_steps - 1:
               break
 
-          delta_grad = delta.grad.clone().detach()
+          if dia_dataset is not None:
+            ### calculate mlm
+            delta.requires_grad_()
+            mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(dia_batch[0], tokenizer, 0.15)
+            mlm_inputs_ids = mlm_inputs_ids.to(args.device)
+            mlm_labels = mlm_labels.to(args.device)
+            masked_indices = masked_indices.to(args.device)
+            attn_mask = dia_batch[1].to(args.device)
+
+            mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attn_mask, "masked_lm_labels": mlm_labels}
+            #print(mlm_inputs)
+            mlm_outputs = model.forward_mlm(**mlm_inputs)
+            mlm_loss = mlm_outputs[0]
+            mlm_probs = mlm_outputs[1]
+            mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=False, allow_unused=True)
+            dot_prod = 0
+            for g1, g2 in zip(mlm_grad, [p.grad for p in params]):
+              if g1 is None or g2 is None: continue
+              dot_prod = dot_prod - torch.sum(g1*g2)
+            delta_grad = torch.autograd.grad(dot_prod, delta)[0].clone().detach()
+          else:
+            delta_grad = delta.grad.clone().detach()
 
           if args.norm_type == "l2":
               denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
@@ -247,8 +270,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
               embeds_init = model.module.bert.embeddings.word_embeddings(batch[0])
           else:
               embeds_init = model.bert.embeddings.word_embeddings(batch[0])
+          tr_loss += loss.item()
+          loss = None
 
-      tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
         if args.fp16:
           torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -565,6 +589,8 @@ def main():
   parser.add_argument("--predict_langs", type=str, default="en", help="prediction languages")
   parser.add_argument("--train_langs", default="en", type=str,
             help="The languages in the training sets.")
+  parser.add_argument("--dia_langs", default=None, type=str,
+            help="The languages for the dialect.")
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--eval_patience", type=int, default=-1, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
@@ -665,9 +691,12 @@ def main():
 
   # Training
   if args.do_train:
-    train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    dropped_train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
-    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
+    train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
+    if args.dia_langs is not None:
+      dia_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.dia_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
+    else:
+      dia_dataset = None
+    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, dia_dataset)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,

@@ -64,7 +64,8 @@ ALL_MODELS = sum(
 )
 
 MODEL_CLASSES = {
-  "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
+  "bert": (BertConfig, BertForMLMandTokenClassification, BertTokenizer),
+  "xlm": (XLMConfig, XLMForTokenClassification, XLMTokenizer),
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
 
@@ -76,27 +77,15 @@ def set_seed(args):
   if args.n_gpu > 0:
     torch.cuda.manual_seed_all(args.seed)
 
-class ConcatDataset(torch.utils.data.Dataset):
-  def __init__(self, *datasets):
-    self.datasets = datasets
 
-  def __getitem__(self, i):
-    return tuple(d[i] for d in self.datasets)
-
-  def __len__(self):
-    return min(len(d) for d in self.datasets)
-
-
-def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
+def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
 
   args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-  concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
-
-  train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
-  train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+  train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+  train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
   if args.max_steps > 0:
     t_total = args.max_steps
@@ -112,6 +101,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
     {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
   ]
   optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
   if args.fp16:
     try:
@@ -154,175 +144,58 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
-    if cur_epoch == args.update_pretrained_epoch and args.optimizer == 'RecAdam':
-      logger.info(" Update pretrained param at epoch {}".format(cur_epoch))
-      optimizer.update_pretrained()
-    for step, concat_batch in enumerate(epoch_iterator):
+    for step, batch in enumerate(epoch_iterator):
       model.train()
-      batch, dropped_batch = concat_batch
 
+      # get MLM embs
+      mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(batch[0], tokenizer, 0.05)
+      mlm_inputs_ids = mlm_inputs_ids.to(args.device)
+      mlm_labels = mlm_labels.to(args.device)
+      masked_indices = masked_indices.to(args.device)
       batch = tuple(t.to(args.device) for t in batch if t is not None)
-      dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-      #inputs = {"input_ids": batch[0],
-      inputs = {"attention_mask": batch[1],
+
+      mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": batch[1], "masked_lm_labels": mlm_labels}
+      #print(mlm_inputs)
+      mlm_outputs = model.forward_mlm(**mlm_inputs)
+      mlm_loss = mlm_outputs[0]
+      mlm_probs = mlm_outputs[1]
+
+      embeds_init = model.bert.embeddings.word_embeddings(batch[0])
+      masked_indices = masked_indices.unsqueeze(2).float()
+      #print(embeds_init.shape)
+      #print(mlm_probs.shape)
+      #print(masked_indices.shape)
+      #print(model.bert.embeddings.word_embeddings.weight.shape)
+      #exit(0)
+      #embeds_init = (1-masked_indices)*embeds_init + masked_indices*(mlm_probs*model.bert.embeddings.word_embeddings.weight)
+      embeds = (1-masked_indices)*embeds_init + masked_indices*(torch.mm(mlm_probs.view(-1, mlm_probs.size(2)), model.bert.embeddings.word_embeddings.weight).view(embeds_init.size(0), embeds_init.size(1), -1))
+
+      # regular training
+      inputs = {"inputs_embeds": embeds,
+            "attention_mask": batch[1],
             "labels": batch[3]}
-      dropped_inputs = {"attention_mask": dropped_batch[1],
-            "labels": dropped_batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
         inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
-        dropped_inputs["token_type_ids"] = dropped_batch[2] if args.model_type in ["bert", "xlnet"] else None
 
       if args.model_type == "xlm":
         inputs["langs"] = batch[4]
-        dropped_inputs["langs"] = dropped_batch[4]
 
-      # ============================ Code for adversarial training=============
-      # initialize delta
-      if isinstance(model, torch.nn.DataParallel):
-          embeds_init = model.module.bert.embeddings.word_embeddings(batch[0])
-          d_embeds_init = model.module.bert.embeddings.word_embeddings(dropped_batch[0])
+      outputs = model(**inputs)
+      loss = outputs[0]
+
+      if args.n_gpu > 1:
+        # mean() to average on multi-gpu parallel training
+        loss = loss.mean()
+      if args.gradient_accumulation_steps > 1:
+        loss = loss / args.gradient_accumulation_steps
+
+      if args.fp16:
+        with amp.scale_loss(loss, optimizer) as scaled_loss:
+          scaled_loss.backward()
       else:
-          embeds_init = model.bert.embeddings.word_embeddings(batch[0])
-          d_embeds_init = model.bert.embeddings.word_embeddings(dropped_batch[0])
-
-      if args.adv_init_mag > 0:
-          input_mask = inputs['attention_mask'].to(embeds_init)
-          input_lengths = torch.sum(input_mask, 1)
-          if args.norm_type == "l2":
-              delta = torch.zeros_like(embeds_init).uniform_(-1,1) * input_mask.unsqueeze(2)
-              dims = input_lengths * embeds_init.size(-1)
-              mag = args.adv_init_mag/torch.sqrt(dims)
-              delta = (delta*mag.view(-1, 1, 1)).detach()
-          elif args.norm_type == "linf":
-              delta = torch.zeros_like(embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * input_mask.unsqueez(2)
-
-          d_input_mask = dropped_inputs['attention_mask'].to(d_embeds_init)
-          d_input_lengths = torch.sum(d_input_mask, 1)
-          if args.norm_type == "l2":
-              d_delta = torch.zeros_like(d_embeds_init).uniform_(-1,1) * d_input_mask.unsqueeze(2)
-              dims = d_input_lengths * d_embeds_init.size(-1)
-              d_mag = args.adv_init_mag/torch.sqrt(dims)
-              d_delta = (d_delta*d_mag.view(-1, 1, 1)).detach()
-          elif args.norm_type == "linf":
-              d_delta = torch.zeros_like(d_embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * d_input_mask.unsqueez(2)
-
-      else:
-          delta = torch.zeros_like(embeds_init)
-          d_delta = torch.zeros_like(d_embeds_init)
-
-      dp_masks = None
-      d_dp_masks = None
-      for astep in range(args.adv_steps):
-          delta.requires_grad_()
-          inputs["inputs_embeds"] = delta + embeds_init
-          inputs["dp_masks"] = dp_masks 
-
-          #outputs, dp_masks = model(**inputs)
-          outputs = model(**inputs)
-          loss = outputs[0]
-          kept_label_mask = outputs[-2]
-          logits = outputs[-1]
-
-          if args.n_gpu > 1:
-            # mean() to average on multi-gpu parallel training
-            loss = loss.mean()
-          if args.gradient_accumulation_steps > 1:
-            loss = loss / args.gradient_accumulation_steps
-          
-          loss = loss / args.adv_steps 
-
-          d_delta.requires_grad_()
-          dropped_inputs["inputs_embeds"] = d_delta + d_embeds_init
-          dropped_inputs["dp_masks"] = d_dp_masks 
-
-          #outputs, dp_masks = model(**inputs)
-          d_outputs = model(**dropped_inputs)
-          d_loss = d_outputs[0]
-          d_kept_label_mask = d_outputs[-2]
-          d_logits = d_outputs[-1]
-
-          if args.n_gpu > 1:
-            # mean() to average on multi-gpu parallel training
-            d_loss = d_loss.mean()
-          if args.gradient_accumulation_steps > 1:
-            d_loss = d_loss / args.gradient_accumulation_steps
-          
-          d_loss = d_loss / args.adv_steps 
-
-          if args.kl_weight > 0:
-            prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
-            dropped_log_prob = torch.nn.functional.log_softmax(d_logits[d_kept_label_mask], dim=1)
-            if len(prob) > len(dropped_log_prob):
-              prob = prob[:len(dropped_log_prob)]
-            elif len(prob) < len(dropped_log_prob):
-              dropped_log_prob = dropped_log_prob[:len(prob)]
-            kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
-            kl = kl_loss(dropped_log_prob, prob)
-            loss = 0.5*loss + 0.5*d_loss + args.kl_weight*kl / args.adv_steps
-          else:
-            loss = 0.5*loss + 0.5*d_loss
-
-          if args.fp16:
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-              scaled_loss.backward()
-          else:
-            loss.backward()
-
-          if astep == args.adv_steps - 1:
-              break
-
-          delta_grad = delta.grad.clone().detach()
-
-          if args.norm_type == "l2":
-              denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
-              denorm = torch.clamp(denorm, min=1e-8)
-              delta = (delta + args.adv_lr*delta_grad/denorm).detach()
-              if args.adv_max_norm > 0:
-                  delta_norm = torch.norm(delta.view(delta.size(0), -1).float(), p=2, dim=1).detach()
-                  exceed_mask = (delta_norm > args.adv_max_norm).to(embeds_init)
-                  reweights = (args.adv_max_norm / delta_norm * exceed_mask + (1-exceed_mask)).view(-1, 1, 1)
-                  delta = (delta*reweights).detach()
-          elif args.norm_type == "linf":
-              denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
-              denorm = torch.clamp(denorm, min=1e-8)
-              delta = (delta + args.adv_lr * delta_grad / denorm).detach()
-              if args.adv_max_norm > 0:
-                  delta = torch.clamp(delta, -args.adv_max_norm, args.adv_max_norm).detach()
-          else:
-              print("Norm type {} not known".format(args.norm_type))
-              exit()
-          if isinstance(model, torch.nn.DataParallel):
-              embeds_init = model.module.bert.embeddings.word_embeddings(batch[0])
-          else:
-              embeds_init = model.bert.embeddings.word_embeddings(batch[0])
-
-
-          d_delta_grad = d_delta.grad.clone().detach()
-
-          if args.norm_type == "l2":
-              d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
-              d_denorm = torch.clamp(d_denorm, min=1e-8)
-              d_delta = (d_delta + args.adv_lr*d_delta_grad/d_denorm).detach()
-              if args.adv_max_norm > 0:
-                  d_delta_norm = torch.norm(d_delta.view(d_delta.size(0), -1).float(), p=2, dim=1).detach()
-                  exceed_mask = (d_delta_norm > args.adv_max_norm).to(d_embeds_init)
-                  reweights = (args.adv_max_norm / d_delta_norm * exceed_mask + (1-exceed_mask)).view(-1, 1, 1)
-                  d_delta = (d_delta*reweights).detach()
-          elif args.norm_type == "linf":
-              d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
-              d_denorm = torch.clamp(d_denorm, min=1e-8)
-              d_delta = (d_delta + args.adv_lr * d_delta_grad / denorm).detach()
-              if args.adv_max_norm > 0:
-                  d_delta = torch.clamp(d_delta, -args.adv_max_norm, args.adv_max_norm).detach()
-          else:
-              print("Norm type {} not known".format(args.norm_type))
-              exit()
-          if isinstance(model, torch.nn.DataParallel):
-              d_embeds_init = d_model.module.bert.embeddings.word_embeddings(dropped_batch[0])
-          else:
-              d_embeds_init = model.bert.embeddings.word_embeddings(dropped_batch[0])
+        loss.backward()
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -476,21 +349,22 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
     logger.info("***** Evaluation result %s in %s *****" % (prefix, lang))
     for key in sorted(results.keys()):
       logger.info("  %s = %s", key, str(results[key]))
-
   return results, preds_list
 
 
-def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_drop=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  if bpe_drop > 0:
+  bpe_dropout = args.bpe_dropout
+  if mode != 'train': bpe_dropout = 0
+  if bpe_dropout > 0:
     cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}_drop{}".format(mode, lang,
       list(filter(None, args.model_name_or_path.split("/"))).pop(),
-      str(args.max_seq_length), bpe_drop))
+      str(args.max_seq_length), bpe_dropout))
   else:
     cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
       list(filter(None, args.model_name_or_path.split("/"))).pop(),
@@ -517,12 +391,67 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
                           pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
                           pad_token_label_id=pad_token_label_id,
                           lang=lg,
-                          bpe_dropout=bpe_drop,
+                          bpe_dropout=bpe_dropout,
                           )
       features.extend(features_lg)
     if args.local_rank in [-1, 0]:
       logger.info("Saving features into cached file {}, len(features)={}".format(cached_features_file, len(features)))
       torch.save(features, cached_features_file)
+
+  # Make sure only the first process in distributed training process
+  # the dataset, and the others will use the cache
+  if args.local_rank == 0 and not evaluate:
+    torch.distributed.barrier()
+
+  if few_shot > 0 and mode == 'train':
+    logger.info("Original no. of examples = {}".format(len(features)))
+    features = features[: few_shot]
+    logger.info('Using few-shot learning on {} examples'.format(len(features)))
+
+  # Convert to Tensors and build dataset
+  all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+  all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
+  all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+  all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
+  if args.model_type == 'xlm' and features[0].langs is not None:
+    all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
+    logger.info('all_langs[0] = {}'.format(all_langs[0]))
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
+  else:
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+  return dataset
+
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+  # Make sure only the first process in distributed training process
+  # the dataset, and the others will use the cache
+  if args.local_rank not in [-1, 0] and not evaluate:
+    torch.distributed.barrier()
+
+  # Load data features from cache or dataset file
+  bpe_dropout = args.bpe_dropout
+  if mode != 'train': bpe_dropout = 0
+  assert bpe_dropout > 0
+  langs = lang.split(',')
+  logger.info("all languages = {}".format(lang))
+  features = []
+  for lg in langs:
+    data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
+    logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
+    examples = read_examples_from_file(data_file, lg, lang2id)
+    features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
+                        cls_token_at_end=bool(args.model_type in ["xlnet"]),
+                        cls_token=tokenizer.cls_token,
+                        cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
+                        sep_token=tokenizer.sep_token,
+                        sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
+                        pad_on_left=bool(args.model_type in ["xlnet"]),
+                        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+                        pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
+                        pad_token_label_id=pad_token_label_id,
+                        lang=lg,
+                        bpe_dropout=bpe_dropout,
+                        )
+    features.extend(features_lg)
 
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
@@ -643,21 +572,13 @@ def main():
             help="The languages in the training sets.")
   parser.add_argument("--log_file", type=str, default=None, help="log file")
   parser.add_argument("--eval_patience", type=int, default=-1, help="wait N times of decreasing dev score before early stop during training")
-  parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
 
   parser.add_argument("--bpe_dropout", default=0, type=float)
-  parser.add_argument("--kl_weight", default=0, type=float)
-  parser.add_argument("--kl_t", default=1, type=float)
+  parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   parser.add_argument("--fix_class", action='store_true')
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
-
-  parser.add_argument("--adv-init-mag", default=0, type=float)
-  parser.add_argument("--adv-steps", default=1, type=int)
-  parser.add_argument("--adv-lr", default=0, type=float)
-  parser.add_argument("--adv-max-norm", default=0, type=float)
-  parser.add_argument("--norm-type", default="l2", type=str, choices=["l2", "linf"])
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -742,8 +663,7 @@ def main():
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    dropped_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
-    global_step, tr_loss = train(args, train_dataset, dropped_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
+    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,
@@ -875,62 +795,6 @@ def main():
         infile = os.path.join(args.data_dir, lang, "dev.{}".format(args.model_name_or_path))
         idxfile = infile + '.idx'
         save_predictions(args, predictions, output_test_predictions_file, infile, idxfile)
-
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
-  if args.local_rank not in [-1, 0] and not evaluate:
-    torch.distributed.barrier()
-
-  # Load data features from cache or dataset file
-  bpe_dropout = args.bpe_dropout
-  if mode != 'train': bpe_dropout = 0
-  assert bpe_dropout > 0
-  langs = lang.split(',')
-  logger.info("all languages = {}".format(lang))
-  features = []
-  for lg in langs:
-    data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
-    logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
-    examples = read_examples_from_file(data_file, lg, lang2id)
-    features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
-                        cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                        cls_token=tokenizer.cls_token,
-                        cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                        sep_token=tokenizer.sep_token,
-                        sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
-                        pad_on_left=bool(args.model_type in ["xlnet"]),
-                        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                        pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-                        pad_token_label_id=pad_token_label_id,
-                        lang=lg,
-                        bpe_dropout=bpe_dropout,
-                        )
-    features.extend(features_lg)
-
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
-  if args.local_rank == 0 and not evaluate:
-    torch.distributed.barrier()
-
-  if few_shot > 0 and mode == 'train':
-    logger.info("Original no. of examples = {}".format(len(features)))
-    features = features[: few_shot]
-    logger.info('Using few-shot learning on {} examples'.format(len(features)))
-
-  # Convert to Tensors and build dataset
-  all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-  all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
-  all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-  all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-  if args.model_type == 'xlm' and features[0].langs is not None:
-    all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
-    logger.info('all_langs[0] = {}'.format(all_langs[0]))
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
-  else:
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-  return dataset
-
 
 def save_predictions(args, predictions, output_file, text_file, idx_file, output_word_prediction=False):
   # Save predictions

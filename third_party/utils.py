@@ -34,7 +34,7 @@ def mask_tokens(inputs: torch.Tensor, tokenizer, mlm_probability=0.15):
     inputs[indices_random] = random_words[indices_random]
 
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-    return inputs, labels
+    return inputs, labels, masked_indices
 
 
 def mask_tokens_sde(inputs: torch.Tensor, tokenizer, mlm_probability=0.15):
