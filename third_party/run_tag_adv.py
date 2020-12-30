@@ -219,6 +219,18 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
             loss = loss / args.gradient_accumulation_steps
           
           loss = loss / args.adv_steps 
+          if args.fp16:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+              scaled_loss.backward()
+          else:
+            loss.backward()
+
+          tr_loss += loss.item()
+
+          #if astep == args.adv_steps - 1:
+          #    loss = None
+          #    break
+          loss = None
           if dia_dataset is not None:
             mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(dia_batch[0], tokenizer, 0.15)
             mlm_inputs_ids = mlm_inputs_ids.to(args.device)
@@ -226,21 +238,35 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
             masked_indices = masked_indices.to(args.device)
             attn_mask = dia_batch[1].to(args.device)
             mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attn_mask, "masked_lm_labels": mlm_labels}
-            #print(mlm_inputs)
-            mlm_outputs = model.forward_mlm(**mlm_inputs)
+            #mlm_outputs = model.forward_mlm(**mlm_inputs)
+
+            dia_batch = tuple(t.to(args.device) for t in dia_batch if t is not None)
+            mlm_inputs = {"input_ids": dia_batch[0], "attention_mask": attn_mask, "labels": dia_batch[3]}
+            mlm_outputs = model.forward(**mlm_inputs)
+
             mlm_loss = mlm_outputs[0]
             mlm_probs = mlm_outputs[1]
-            mlm_loss = mlm_loss.mean() / (args.gradient_accumulation_steps*args.adv_steps)
-            mlm_loss.backward()
-            #mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=True, create_graph=True, allow_unused=True)
+            if args.n_gpu > 1:
+                mlm_loss = mlm_loss.mean()
+            mlm_loss = mlm_loss / (args.gradient_accumulation_steps*args.adv_steps)
+            #mlm_loss.backward()
+            mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=True, create_graph=True, allow_unused=True)
 
-            #task_grad = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
+            outputs = model(**inputs)
+            loss = outputs[0]
+
+            if args.n_gpu > 1:
+              # mean() to average on multi-gpu parallel training
+              loss = loss.mean()
+            loss = loss / (args.gradient_accumulation_steps * args.adv_steps) 
+            task_grad = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
             #### calculate mlm
-            #dot_prod = 0
-            #for g1, g2 in zip(mlm_grad, task_grad):
-            #  if g1 is None or g2 is None: continue
-            #  dot_prod = dot_prod - torch.sum(g1*g2)
-            #delta_grad = torch.autograd.grad(dot_prod, delta)[0].clone().detach()
+            dot_prod = 0
+            for g1, g2 in zip(mlm_grad, task_grad):
+              if g1 is None or g2 is None: continue
+              dot_prod = dot_prod - torch.sum(g1*g2)
+            delta_grad = torch.autograd.grad(dot_prod, delta)[0].clone().detach()
+            delta_grad = delta.grad.clone().detach()
           else:
             delta_grad = delta.grad.clone().detach()
 
@@ -272,25 +298,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           #kept_label_mask = outputs[-2]
           #logits = outputs[-1]
 
-          if args.n_gpu > 1:
-            # mean() to average on multi-gpu parallel training
-            loss = loss.mean()
-          if args.gradient_accumulation_steps > 1:
-            loss = loss / args.gradient_accumulation_steps
-          
-          loss = loss / args.adv_steps 
-          if args.fp16:
-            with amp.scale_loss(loss, optimizer) as scaled_loss:
-              scaled_loss.backward()
-          else:
-            loss.backward()
-
-          tr_loss += loss.item()
-
-          if astep == args.adv_steps - 1:
-              loss = None
-              break
-          loss = None
 
 
       if (step + 1) % args.gradient_accumulation_steps == 0:
