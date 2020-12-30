@@ -195,6 +195,17 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
       else:
           delta = torch.zeros_like(embeds_init)
 
+      mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(dia_batch[0], tokenizer, 0.15)
+      mlm_inputs_ids = mlm_inputs_ids.to(args.device)
+      mlm_labels = mlm_labels.to(args.device)
+      masked_indices = masked_indices.to(args.device)
+      attn_mask = dia_batch[1].to(args.device)
+      mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attn_mask, "masked_lm_labels": mlm_labels}
+      #print(mlm_inputs)
+      mlm_outputs = model.forward_mlm(**mlm_inputs)
+      mlm_loss = mlm_outputs[0]
+      mlm_probs = mlm_outputs[1]
+      mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=False, allow_unused=True)
       #params = params + [delta]
       dp_masks = None
       for astep in range(args.adv_steps):
@@ -222,24 +233,14 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           else:
             loss.backward(retain_graph=(dia_dataset is not None), create_graph=(dia_dataset is not None))
 
+          tr_loss += loss.item()
+
           if astep == args.adv_steps - 1:
               break
 
           if dia_dataset is not None:
             ### calculate mlm
             delta.requires_grad_()
-            mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(dia_batch[0], tokenizer, 0.15)
-            mlm_inputs_ids = mlm_inputs_ids.to(args.device)
-            mlm_labels = mlm_labels.to(args.device)
-            masked_indices = masked_indices.to(args.device)
-            attn_mask = dia_batch[1].to(args.device)
-
-            mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attn_mask, "masked_lm_labels": mlm_labels}
-            #print(mlm_inputs)
-            mlm_outputs = model.forward_mlm(**mlm_inputs)
-            mlm_loss = mlm_outputs[0]
-            mlm_probs = mlm_outputs[1]
-            mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=False, allow_unused=True)
             dot_prod = 0
             for g1, g2 in zip(mlm_grad, [p.grad for p in params]):
               if g1 is None or g2 is None: continue
@@ -248,6 +249,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           else:
             delta_grad = delta.grad.clone().detach()
 
+          loss = None
           if args.norm_type == "l2":
               denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
               denorm = torch.clamp(denorm, min=1e-8)
@@ -270,8 +272,6 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
               embeds_init = model.module.bert.embeddings.word_embeddings(batch[0])
           else:
               embeds_init = model.bert.embeddings.word_embeddings(batch[0])
-          tr_loss += loss.item()
-          loss = None
 
       if (step + 1) % args.gradient_accumulation_steps == 0:
         if args.fp16:
