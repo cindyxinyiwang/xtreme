@@ -84,7 +84,8 @@ class ConcatDataset(torch.utils.data.Dataset):
     return tuple(d[i % len(d)] for d in self.datasets)
 
   def __len__(self):
-    return max(len(d) for d in self.datasets)
+    #return max(len(d) for d in self.datasets)
+    return len(self.datasets[0])
 
 
 def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, dia_dataset=None):
@@ -229,15 +230,17 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
             mlm_outputs = model.forward_mlm(**mlm_inputs)
             mlm_loss = mlm_outputs[0]
             mlm_probs = mlm_outputs[1]
-            mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=True, create_graph=True, allow_unused=True)
+            mlm_loss = mlm_loss.mean() / (args.gradient_accumulation_steps*args.adv_steps)
+            mlm_loss.backward()
+            #mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=True, create_graph=True, allow_unused=True)
 
-            task_grad = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
-            ### calculate mlm
-            dot_prod = 0
-            for g1, g2 in zip(mlm_grad, task_grad):
-              if g1 is None or g2 is None: continue
-              dot_prod = dot_prod - torch.sum(g1*g2)
-            delta_grad = torch.autograd.grad(dot_prod, delta)[0].clone().detach()
+            #task_grad = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
+            #### calculate mlm
+            #dot_prod = 0
+            #for g1, g2 in zip(mlm_grad, task_grad):
+            #  if g1 is None or g2 is None: continue
+            #  dot_prod = dot_prod - torch.sum(g1*g2)
+            #delta_grad = torch.autograd.grad(dot_prod, delta)[0].clone().detach()
           else:
             delta_grad = delta.grad.clone().detach()
 
@@ -264,10 +267,10 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           else:
               embeds_init = model.bert.embeddings.word_embeddings(batch[0])
 
-          outputs = model(**inputs)
-          loss = outputs[0]
-          kept_label_mask = outputs[-2]
-          logits = outputs[-1]
+          #outputs = model(**inputs)
+          #loss = outputs[0]
+          #kept_label_mask = outputs[-2]
+          #logits = outputs[-1]
 
           if args.n_gpu > 1:
             # mean() to average on multi-gpu parallel training
