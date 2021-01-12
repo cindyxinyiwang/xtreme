@@ -78,16 +78,18 @@ def mask_tokens_sde(inputs: torch.Tensor, tokenizer, mlm_probability=0.15):
 def mlm_switch_tokens(tokens, attention_mask, tokenizer, pretrained_model, p=0.15):
     # get MLM embs
     mlm_inputs_ids, mlm_labels, masked_indices = mask_tokens(tokens, tokenizer, p)
-    mlm_inputs_ids = mlm_inputs_ids.to(pretrained_model.device)
-    mlm_labels = mlm_labels.to(pretrained_model.device)
-    masked_indices = masked_indices.to(pretrained_model.device)
-    attention_mask = attention_mask.to(pretrained_model.device)
+    model_device = next(pretrained_model.parameters()).device
+    tokens = tokens.to(model_device)
+    mlm_inputs_ids = mlm_inputs_ids.to(model_device)
+    mlm_labels = mlm_labels.to(model_device)
+    masked_indices = masked_indices.to(model_device)
+    attention_mask = attention_mask.to(model_device)
 
     mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attention_mask, "masked_lm_labels": mlm_labels}
     #print(mlm_inputs)
     mlm_outputs = pretrained_model.forward_mlm(**mlm_inputs)
     mlm_loss = mlm_outputs[0]
-    mlm_probs = mlm_outputs[1]
+    mlm_probs = torch.softmax(mlm_outputs[1], dim=-1)
     sampled_words_indices = torch.distributions.Categorical(mlm_probs).sample()
     sampled_tokens = tokens * (~masked_indices).long() + sampled_words_indices * masked_indices.long()
     return sampled_tokens
