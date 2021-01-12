@@ -75,9 +75,24 @@ def mask_tokens_sde(inputs: torch.Tensor, tokenizer, mlm_probability=0.15):
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels_ngram
 
+def mlm_switch_tokens(tokens, attention_mask, tokenizer, pretrained_model, p=0.15):
+    # get MLM embs
+    mlm_inputs_ids, mlm_labels, masked_indices = mask_tokens(tokens, tokenizer, p)
+    mlm_inputs_ids = mlm_inputs_ids.to(pretrained_model.device)
+    mlm_labels = mlm_labels.to(pretrained_model.device)
+    masked_indices = masked_indices.to(pretrained_model.device)
+    attention_mask = attention_mask.to(pretrained_model.device)
 
-    
-def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_token_id, vocab_size):
+    mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attention_mask, "masked_lm_labels": mlm_labels}
+    #print(mlm_inputs)
+    mlm_outputs = pretrained_model.forward_mlm(**mlm_inputs)
+    mlm_loss = mlm_outputs[0]
+    mlm_probs = mlm_outputs[1]
+    sampled_words_indices = torch.distributions.Categorical(mlm_probs).sample()
+    sampled_tokens = tokens * (~masked_indices).long() + sampled_words_indices * masked_indices.long()
+    return sampled_tokens
+
+def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_token_id, vocab_size, vocab_dist=None, vocabs=None):
     # first sample the number of words to corrupt
     max_len = tokens.size(1)
 
@@ -87,10 +102,6 @@ def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_
     sample_mask = ~((~pad_mask) & (~cls_mask) & (~sep_mask))
 
     logits = torch.arange(max_len).float().to(tokens.device)
-    #mask = []
-    #for i in lengths.tolist():
-    #    mask.append([0 for _ in range(i)] + [1 for _ in range(max_len-i)])
-    #mask = torch.LongTensor(mask).bool()
     lengths = mask.long().sum(dim=-1)
     # 1 for padding, 0 for tokens
     mask = (1-mask).bool()
@@ -106,10 +117,24 @@ def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_
     if total_words == 0:
         return tokens
     # sample the corrupts
-    corrupt_val = torch.LongTensor(total_words).to(tokens.device)
-    corrupts = torch.zeros_like(tokens).long().to(tokens.device)
-    corrupts = corrupts.masked_scatter_(corrupt_pos, corrupt_val)
-    sampled_tokens = tokens.add(corrupts).remainder_(vocab_size).masked_fill_(pad_mask, pad_token_id)
+    if vocab_dist is not None:
+      assert vocabs is not None
+      # vocab: tensor of allowed vocab [1, vocab_size]
+      # vocab_dist: dict of numpy values of sampling probabilities 
+      corrupt_words = tokens[corrupt_pos].view(-1)
+      corrupt_words_dist = []
+      for w in corrupt_words.cpu().numpy():
+        corrupt_words_dist.append(vocab_dist[w])
+      corrupt_words_dist = torch.FloatTensor(corrupt_words_dist).to(tokens.device)
+      # num_words x 1
+      sampled_words_indices = torch.distributions.Categorical(corrupt_words_dist).sample().view(-1, 1)
+      corrupt_val = torch.gather(vocabs.expand(corrupt_words.size(0), -1).to(tokens.device), 1, sampled_words_indices)
+      sampled_tokens = tokens.masked_scatter_(corrupt_pos, corrupt_val)
+    else:
+      corrupt_val = torch.LongTensor(total_words).to(tokens.device)
+      corrupts = torch.zeros_like(tokens).long().to(tokens.device)
+      corrupts = corrupts.masked_scatter_(corrupt_pos, corrupt_val)
+      sampled_tokens = tokens.add(corrupts).remainder_(vocab_size).masked_fill_(pad_mask, pad_token_id)
     return sampled_tokens
 
 

@@ -168,6 +168,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
       if dia_dataset is not None:
           batch, dia_batch = batch
       model.train()
+      normal_mlm_inputs_ids, normal_mlm_labels, normal_masked_indices = utils.mask_tokens(batch[0], tokenizer, 0.15)
       batch = tuple(t.to(args.device) for t in batch if t is not None)
       #inputs = {"input_ids": batch[0],
       inputs = {"attention_mask": batch[1],
@@ -232,41 +233,50 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           #    break
           loss = None
           if dia_dataset is not None:
-            mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(dia_batch[0], tokenizer, 0.15)
-            mlm_inputs_ids = mlm_inputs_ids.to(args.device)
-            mlm_labels = mlm_labels.to(args.device)
-            masked_indices = masked_indices.to(args.device)
-            attn_mask = dia_batch[1].to(args.device)
-            mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attn_mask, "masked_lm_labels": mlm_labels}
+            #mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(dia_batch[0], tokenizer, 0.15)
+            #mlm_inputs_ids = mlm_inputs_ids.to(args.device)
+            #mlm_labels = mlm_labels.to(args.device)
+            #masked_indices = masked_indices.to(args.device)
+            #attn_mask = dia_batch[1].to(args.device)
+            #mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": attn_mask, "masked_lm_labels": mlm_labels}
             #mlm_outputs = model.forward_mlm(**mlm_inputs)
 
             dia_batch = tuple(t.to(args.device) for t in dia_batch if t is not None)
-            mlm_inputs = {"input_ids": dia_batch[0], "attention_mask": attn_mask, "labels": dia_batch[3]}
+            mlm_inputs = {"input_ids": dia_batch[0], "attention_mask": dia_batch[1], "labels": dia_batch[3]}
             mlm_outputs = model.forward(**mlm_inputs)
 
             mlm_loss = mlm_outputs[0]
             mlm_probs = mlm_outputs[1]
             if args.n_gpu > 1:
                 mlm_loss = mlm_loss.mean()
-            mlm_loss = mlm_loss / (args.gradient_accumulation_steps*args.adv_steps)
             #mlm_loss.backward()
             mlm_grad = torch.autograd.grad(mlm_loss, params, retain_graph=True, create_graph=True, allow_unused=True)
 
+            #normal_mlm_inputs_ids = normal_mlm_inputs_ids.to(args.device)
+            #normal_mlm_labels = normal_mlm_labels.to(args.device)
+            #normal_masked_indices = normal_masked_indices.to(args.device)
+            #normal_attn_mask = batch[1].to(args.device)
+            #normal_embeds = model.bert.embeddings.word_embeddings(normal_mlm_inputs_ids)
+            #normal_embeds = normal_embeds+delta*(~normal_masked_indices).float().unsqueeze(2)
+            #normal_mlm_inputs = {"inputs_embeds": normal_embeds, "attention_mask": normal_attn_mask, "masked_lm_labels": normal_mlm_labels}
+            #normal_mlm_outputs = model.forward_mlm(**normal_mlm_inputs)
+            #loss = normal_mlm_outputs[0]
             outputs = model(**inputs)
             loss = outputs[0]
 
             if args.n_gpu > 1:
               # mean() to average on multi-gpu parallel training
               loss = loss.mean()
-            loss = loss / (args.gradient_accumulation_steps * args.adv_steps) 
             task_grad = torch.autograd.grad(loss, params, create_graph=True, retain_graph=True)
             #### calculate mlm
             dot_prod = 0
             for g1, g2 in zip(mlm_grad, task_grad):
               if g1 is None or g2 is None: continue
-              dot_prod = dot_prod - torch.sum(g1*g2)
+              if args.max_dot_prod:
+                  dot_prod = dot_prod + torch.sum(g1*g2)
+              else:
+                  dot_prod = dot_prod - torch.sum(g1*g2)
             delta_grad = torch.autograd.grad(dot_prod, delta)[0].clone().detach()
-            delta_grad = delta.grad.clone().detach()
           else:
             delta_grad = delta.grad.clone().detach()
 
@@ -565,6 +575,8 @@ def main():
             help="Set this flag if you are using an uncased model.")
   parser.add_argument("--few_shot", default=-1, type=int,
             help="num of few-shot exampes")
+  parser.add_argument("--dia_few_shot", default=-1, type=int,
+            help="num of few-shot exampes")
 
   parser.add_argument("--per_gpu_train_batch_size", default=8, type=int,
             help="Batch size per GPU/CPU for training.")
@@ -635,6 +647,7 @@ def main():
   parser.add_argument("--adv-lr", default=0, type=float)
   parser.add_argument("--adv-max-norm", default=0, type=float)
   parser.add_argument("--norm-type", default="l2", type=str, choices=["l2", "linf"])
+  parser.add_argument("--max-dot-prod", action='store_true')
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -720,7 +733,7 @@ def main():
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
     if args.dia_langs is not None:
-      dia_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.dia_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
+      dia_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.dia_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.dia_few_shot)
     else:
       dia_dataset = None
     global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, dia_dataset)

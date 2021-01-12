@@ -31,9 +31,6 @@ LANGS="is,fo"
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
-BPE_DROP=0.2
-KL=0.2 
-KL_T=1
 # ran 000,100,111,001
 # to run: 101,011,010,110,
 LC=""
@@ -54,16 +51,14 @@ else
   GRAD_ACC=4
 fi
 
-TAU=0
-DTAU=0
-VTAU=1
-DMLM=0.1
+BPE_DROP=0
+TAU=0.15
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
 for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_tlangs${TRAIN_LANGS}_mbped${BPE_DROP}_dmlm${DMLM}_vtau${VTAU}_tau${TAU}_dtau${DTAU}_kl${KL}_klt${KL_T}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_tlangs${TRAIN_LANGS}_bped${BPE_DROP}_emb${TAU}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_mv_tag.py \
+python $REPO/third_party/run_tag_emb.py \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -85,12 +80,6 @@ python $REPO/third_party/run_mv_tag.py \
   --overwrite_output_dir \
   --train_langs $TRAIN_LANGS \
   --bpe_dropout $BPE_DROP \
-  --kl_weight $KL \
-  --kl_t $KL_T \
-  --tau $TAU \
-  --drop_tau $DTAU \
-  --drop_mlm_p $DMLM \
-  --vocab_dist_filename /pylon5/dbs200003p/xinyiw1/outputs/bert.json \
-  --vocab_dist_tau $VTAU \
+  --emb_dropout $TAU \
   --save_only_best_checkpoint $LC
 done

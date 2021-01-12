@@ -28,8 +28,8 @@ OUT_DIR=${4:-"$SCRATCH/outputs/"}
 TASK='udpos'
 #LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
 #TRAIN_LANGS="en"
-TRAIN_LANGS="el"
-LANGS="el,grc"
+TRAIN_LANGS="is"
+LANGS="is,fo"
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
@@ -54,14 +54,14 @@ else
 fi
 
 ALR=3e-2
-ASTEP=4
+ASTEP=1
 ANORM=0
 AMAG=0
-
+BPE_DROP=0.2
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 1;
+for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_bped${BPE_DROP}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_tag_adv.py \
   --data_dir $DATA_DIR \
@@ -88,5 +88,6 @@ python $REPO/third_party/run_tag_adv.py \
   --adv-steps $ASTEP \
   --adv-max-norm $ANORM \
   --adv-init-mag $AMAG \
+  --bpe_dropout $BPE_DROP \
   --save_only_best_checkpoint $LC
 done

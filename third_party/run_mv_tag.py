@@ -23,6 +23,8 @@ import glob
 import logging
 import os
 import random
+import json
+import scipy
 
 import numpy as np
 import torch
@@ -65,6 +67,7 @@ ALL_MODELS = sum(
 
 MODEL_CLASSES = {
   "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
+  "mlm_bert": (BertConfig, BertForMLMandTokenClassification, BertTokenizer),
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
 
@@ -87,7 +90,7 @@ class ConcatDataset(torch.utils.data.Dataset):
     return min(len(d) for d in self.datasets)
 
 
-def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
+def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None, pretrained_model=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
@@ -141,6 +144,22 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
+  if args.vocab_dist_filename is not None:
+    # load vocab dist sampling for perturbation
+    vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
+    vocabs = vocab_dist_data['vocab']
+    constraint_vocabs_size = len(vocabs)
+    vocab_dist = vocab_dist_data['vocab_distance']
+    vocabs = torch.LongTensor(vocabs).view(1, -1)
+    new_vocab_dist = {}
+    for k, v in vocab_dist.items():
+      # normalize the sample prob
+      new_vocab_dist[int(k)] = scipy.special.softmax([-float(vi)/args.vocab_dist_tau for vi in v])
+    new_vocab_dist[tokenizer.vocab.get(tokenizer.unk_token)] = [1/constraint_vocabs_size for _ in range(constraint_vocabs_size)]
+    vocab_dist = new_vocab_dist
+  else:
+    vocabs, vocab_dist = None, None
+
   best_score = 0.0
   best_checkpoint = None
   patience = 0
@@ -160,10 +179,18 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
     for step, concat_batch in enumerate(epoch_iterator):
       model.train()
       batch, dropped_batch = concat_batch
-      batch = tuple(t.to(args.device) for t in batch if t is not None)
-      inputs = {"input_ids": batch[0],
-            "attention_mask": batch[1],
-            "labels": batch[3]}
+      if args.tau > 0:
+        input_tokens = utils.switch_out(batch[0], mask=batch[1], tau=args.tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab))
+        input_tokens = input_tokens.to(args.device)
+        batch = tuple(t.to(args.device) for t in batch if t is not None)
+        inputs = {"input_ids": input_tokens,
+              "attention_mask": batch[1],
+              "labels": batch[3]}
+      else:
+        batch = tuple(t.to(args.device) for t in batch if t is not None)
+        inputs = {"input_ids": batch[0],
+              "attention_mask": batch[1],
+              "labels": batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -177,10 +204,27 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       kept_label_mask = outputs[-2]
       logits = outputs[-1]
 
-      dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-      dropped_inputs = {"input_ids": dropped_batch[0],
-            "attention_mask": dropped_batch[1],
-            "labels": dropped_batch[3]}
+      if args.drop_tau > 0:
+        # switchout
+        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs)
+        drop_input_tokens = drop_input_tokens.to(args.device)
+        dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+        dropped_inputs = {"input_ids": drop_input_tokens,
+              "attention_mask": dropped_batch[1],
+              "labels": dropped_batch[3]}
+      elif args.drop_mlm_p > 0:
+        assert pretrained_model is not None
+        # mlm based corruption
+        drop_input_tokens = utils.mlm_switch_tokens(dropped_batch[0], dropped_batch[1], tokenizer, pretrained_model, p=args.drop_mlm_p)
+        dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+        dropped_inputs = {"input_ids": drop_input_tokens,
+              "attention_mask": dropped_batch[1],
+              "labels": dropped_batch[3]}
+      else:
+        dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+        dropped_inputs = {"input_ids": dropped_batch[0],
+              "attention_mask": dropped_batch[1],
+              "labels": dropped_batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -610,6 +654,11 @@ def main():
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
   parser.add_argument("--fix_class", action='store_true')
+  parser.add_argument("--tau", default=0, type=float)
+  parser.add_argument("--drop_tau", default=0, type=float)
+  parser.add_argument("--vocab_dist_filename", type=str, default=None)
+  parser.add_argument("--vocab_dist_tau", default=1, type=float)
+  parser.add_argument("--drop_mlm_p", default=0, type=float)
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
@@ -666,6 +715,7 @@ def main():
 
   args.model_type = args.model_type.lower()
   config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
+  pretrained_config_class, pretrained_model_class, pretrained_tokenizer_class = MODEL_CLASSES["mlm_"+args.model_type]
   config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                       num_labels=num_labels,
                       fix_class=args.fix_class,
@@ -685,6 +735,15 @@ def main():
                       from_tf=bool(".ckpt" in args.model_name_or_path),
                       config=config,
                       cache_dir=args.cache_dir if args.cache_dir else None)
+
+  if args.drop_mlm_p > 0:
+    pretrained_model = pretrained_model_class.from_pretrained(args.model_name_or_path,
+                      from_tf=bool(".ckpt" in args.model_name_or_path),
+                      config=config,
+                      cache_dir=args.cache_dir if args.cache_dir else None)
+  else:
+    pretrained_model = None
+
   lang2id = config.lang2id if args.model_type == "xlm" else None
   logger.info("Using lang2id = {}".format(lang2id))
 
@@ -692,13 +751,17 @@ def main():
   if args.local_rank == 0:
     torch.distributed.barrier()
   model.to(args.device)
+  if pretrained_model is not None:
+    pretrained_model.to(args.device)
+    pretrained_model.eval()
+
   logger.info("Training/evaluation parameters %s", args)
 
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
     dropped_train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
-    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
+    global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,

@@ -146,10 +146,18 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
     cur_epoch += 1
     for step, batch in enumerate(epoch_iterator):
       model.train()
-      batch = tuple(t.to(args.device) for t in batch if t is not None)
-      inputs = {"input_ids": batch[0],
-            "attention_mask": batch[1],
-            "labels": batch[3]}
+      if args.tau > 0:
+        input_tokens = utils.switch_out(batch[0], mask=batch[1], tau=args.tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab))
+        input_tokens = input_tokens.to(args.device)
+        batch = tuple(t.to(args.device) for t in batch if t is not None)
+        inputs = {"input_ids": input_tokens,
+              "attention_mask": batch[1],
+              "labels": batch[3]}
+      else:
+        batch = tuple(t.to(args.device) for t in batch if t is not None)
+        inputs = {"input_ids": batch[0],
+              "attention_mask": batch[1],
+              "labels": batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -552,6 +560,7 @@ def main():
   parser.add_argument("--bpe_dropout", default=0, type=float)
   parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   parser.add_argument("--fix_class", action='store_true')
+  parser.add_argument("--tau", default=0, type=float)
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)

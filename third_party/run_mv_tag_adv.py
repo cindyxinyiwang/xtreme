@@ -23,6 +23,8 @@ import glob
 import logging
 import os
 import random
+import json
+import scipy
 
 import numpy as np
 import torch
@@ -141,6 +143,22 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
+  if args.vocab_dist_filename is not None:
+    # load vocab dist sampling for perturbation
+    vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
+    vocabs = vocab_dist_data['vocab']
+    constraint_vocabs_size = len(vocabs)
+    vocab_dist = vocab_dist_data['vocab_distance']
+    vocabs = torch.LongTensor(vocabs).view(1, -1)
+    new_vocab_dist = {}
+    for k, v in vocab_dist.items():
+      # normalize the sample prob
+      new_vocab_dist[int(k)] = scipy.special.softmax([-float(vi)/args.vocab_dist_tau for vi in v])
+    new_vocab_dist[tokenizer.vocab.get(tokenizer.unk_token)] = [1/constraint_vocabs_size for _ in range(constraint_vocabs_size)]
+    vocab_dist = new_vocab_dist
+  else:
+    vocabs, vocab_dist = None, None
+
   best_score = 0.0
   best_checkpoint = None
   patience = 0
@@ -161,10 +179,16 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       model.train()
       batch, dropped_batch = concat_batch
 
+      if args.drop_tau > 0:
+        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs)
+        drop_input_tokens = drop_input_tokens.to(args.device)
+      else:
+        drop_input_tokens = dropped_batch[0].to(args.device)
+
       batch = tuple(t.to(args.device) for t in batch if t is not None)
       dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-      #inputs = {"input_ids": batch[0],
-      inputs = {"attention_mask": batch[1],
+      inputs = {"input_ids": batch[0],
+             "attention_mask": batch[1],
             "labels": batch[3]}
       dropped_inputs = {"attention_mask": dropped_batch[1],
             "labels": dropped_batch[3]}
@@ -181,23 +205,11 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       # ============================ Code for adversarial training=============
       # initialize delta
       if isinstance(model, torch.nn.DataParallel):
-          embeds_init = model.module.bert.embeddings.word_embeddings(batch[0])
-          d_embeds_init = model.module.bert.embeddings.word_embeddings(dropped_batch[0])
+          d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
       else:
-          embeds_init = model.bert.embeddings.word_embeddings(batch[0])
-          d_embeds_init = model.bert.embeddings.word_embeddings(dropped_batch[0])
+          d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
 
       if args.adv_init_mag > 0:
-          input_mask = inputs['attention_mask'].to(embeds_init)
-          input_lengths = torch.sum(input_mask, 1)
-          if args.norm_type == "l2":
-              delta = torch.zeros_like(embeds_init).uniform_(-1,1) * input_mask.unsqueeze(2)
-              dims = input_lengths * embeds_init.size(-1)
-              mag = args.adv_init_mag/torch.sqrt(dims)
-              delta = (delta*mag.view(-1, 1, 1)).detach()
-          elif args.norm_type == "linf":
-              delta = torch.zeros_like(embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * input_mask.unsqueez(2)
-
           d_input_mask = dropped_inputs['attention_mask'].to(d_embeds_init)
           d_input_lengths = torch.sum(d_input_mask, 1)
           if args.norm_type == "l2":
@@ -206,17 +218,16 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
               d_mag = args.adv_init_mag/torch.sqrt(dims)
               d_delta = (d_delta*d_mag.view(-1, 1, 1)).detach()
           elif args.norm_type == "linf":
-              d_delta = torch.zeros_like(d_embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * d_input_mask.unsqueez(2)
+              #d_delta = torch.zeros_like(d_embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * d_input_mask.unsqueez(2)
+              d_delta = torch.zeros_like(d_embeds_init).normal_(0, 1) * args.adv_init_mag * d_input_mask.unsqueeze(2)
 
       else:
-          delta = torch.zeros_like(embeds_init)
           d_delta = torch.zeros_like(d_embeds_init)
 
       dp_masks = None
       d_dp_masks = None
       for astep in range(args.adv_steps):
-          delta.requires_grad_()
-          inputs["inputs_embeds"] = delta + embeds_init
+          #inputs["inputs_embeds"] = embeds_init
           inputs["dp_masks"] = dp_masks 
 
           #outputs, dp_masks = model(**inputs)
@@ -264,6 +275,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           else:
             loss = 0.5*loss + 0.5*d_loss
 
+          d_delta_grad = torch.autograd.grad(kl, d_delta, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
+
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
               scaled_loss.backward()
@@ -273,36 +286,12 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           if astep == args.adv_steps - 1:
               break
 
-          delta_grad = delta.grad.clone().detach()
-
+          #d_delta_grad = d_delta.grad.clone().detach()
           if args.norm_type == "l2":
-              denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
-              denorm = torch.clamp(denorm, min=1e-8)
-              delta = (delta + args.adv_lr*delta_grad/denorm).detach()
-              if args.adv_max_norm > 0:
-                  delta_norm = torch.norm(delta.view(delta.size(0), -1).float(), p=2, dim=1).detach()
-                  exceed_mask = (delta_norm > args.adv_max_norm).to(embeds_init)
-                  reweights = (args.adv_max_norm / delta_norm * exceed_mask + (1-exceed_mask)).view(-1, 1, 1)
-                  delta = (delta*reweights).detach()
-          elif args.norm_type == "linf":
-              denorm = torch.norm(delta_grad.view(delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
-              denorm = torch.clamp(denorm, min=1e-8)
-              delta = (delta + args.adv_lr * delta_grad / denorm).detach()
-              if args.adv_max_norm > 0:
-                  delta = torch.clamp(delta, -args.adv_max_norm, args.adv_max_norm).detach()
-          else:
-              print("Norm type {} not known".format(args.norm_type))
-              exit()
-          if isinstance(model, torch.nn.DataParallel):
-              embeds_init = model.module.bert.embeddings.word_embeddings(batch[0])
-          else:
-              embeds_init = model.bert.embeddings.word_embeddings(batch[0])
-
-
-          d_delta_grad = d_delta.grad.clone().detach()
-
-          if args.norm_type == "l2":
-              d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
+              # sent level
+              #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
+              # word level
+              d_denorm = torch.norm(d_delta_grad, dim=-1, keepdim=True)
               d_denorm = torch.clamp(d_denorm, min=1e-8)
               d_delta = (d_delta + args.adv_lr*d_delta_grad/d_denorm).detach()
               if args.adv_max_norm > 0:
@@ -311,18 +300,19 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
                   reweights = (args.adv_max_norm / d_delta_norm * exceed_mask + (1-exceed_mask)).view(-1, 1, 1)
                   d_delta = (d_delta*reweights).detach()
           elif args.norm_type == "linf":
-              d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
+              #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
+              d_denorm = torch.norm(d_delta_grad, dim=-1, p=float("inf"), keepdim=True)
               d_denorm = torch.clamp(d_denorm, min=1e-8)
-              d_delta = (d_delta + args.adv_lr * d_delta_grad / denorm).detach()
+              d_delta = (d_delta + args.adv_lr * d_delta_grad / d_denorm).detach()
               if args.adv_max_norm > 0:
                   d_delta = torch.clamp(d_delta, -args.adv_max_norm, args.adv_max_norm).detach()
           else:
               print("Norm type {} not known".format(args.norm_type))
               exit()
           if isinstance(model, torch.nn.DataParallel):
-              d_embeds_init = d_model.module.bert.embeddings.word_embeddings(dropped_batch[0])
+              d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
           else:
-              d_embeds_init = model.bert.embeddings.word_embeddings(dropped_batch[0])
+              d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -657,7 +647,14 @@ def main():
   parser.add_argument("--adv-steps", default=1, type=int)
   parser.add_argument("--adv-lr", default=0, type=float)
   parser.add_argument("--adv-max-norm", default=0, type=float)
-  parser.add_argument("--norm-type", default="l2", type=str, choices=["l2", "linf"])
+  parser.add_argument("--norm-type", default="linf", type=str, choices=["l2", "linf"])
+
+  parser.add_argument("--tau", default=0, type=float)
+  parser.add_argument("--drop_tau", default=0, type=float)
+  parser.add_argument("--vocab_dist_filename", type=str, default=None)
+  parser.add_argument("--vocab_dist_tau", default=1, type=float)
+
+
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(

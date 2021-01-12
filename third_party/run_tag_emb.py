@@ -78,7 +78,7 @@ def set_seed(args):
     torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id=None):
+def train(args, train_dataset, model, pretrained_model, tokenizer, labels, pad_token_label_id, lang2id=None):
   """Train the model."""
   if args.local_rank in [-1, 0]:
     tb_writer = SummaryWriter()
@@ -148,7 +148,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
       model.train()
 
       # get MLM embs
-      mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(batch[0], tokenizer, 0.05)
+      mlm_inputs_ids, mlm_labels, masked_indices = utils.mask_tokens(batch[0], tokenizer, args.emb_dropout)
       mlm_inputs_ids = mlm_inputs_ids.to(args.device)
       mlm_labels = mlm_labels.to(args.device)
       masked_indices = masked_indices.to(args.device)
@@ -156,7 +156,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
       mlm_inputs = {"input_ids": mlm_inputs_ids, "attention_mask": batch[1], "masked_lm_labels": mlm_labels}
       #print(mlm_inputs)
-      mlm_outputs = model.forward_mlm(**mlm_inputs)
+      mlm_outputs = pretrained_model.forward_mlm(**mlm_inputs)
       mlm_loss = mlm_outputs[0]
       mlm_probs = mlm_outputs[1]
 
@@ -576,6 +576,7 @@ def main():
   parser.add_argument("--bpe_dropout", default=0, type=float)
   parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
   parser.add_argument("--fix_class", action='store_true')
+  parser.add_argument("--emb_dropout", default=0, type=float)
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
@@ -651,6 +652,12 @@ def main():
                       from_tf=bool(".ckpt" in args.model_name_or_path),
                       config=config,
                       cache_dir=args.cache_dir if args.cache_dir else None)
+
+  pretrained_model = model_class.from_pretrained(args.model_name_or_path,
+                    from_tf=bool(".ckpt" in args.model_name_or_path),
+                    config=config,
+                    cache_dir=args.cache_dir if args.cache_dir else None)
+
   lang2id = config.lang2id if args.model_type == "xlm" else None
   logger.info("Using lang2id = {}".format(lang2id))
 
@@ -658,12 +665,13 @@ def main():
   if args.local_rank == 0:
     torch.distributed.barrier()
   model.to(args.device)
+  pretrained_model.to(args.device)
   logger.info("Training/evaluation parameters %s", args)
 
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id)
+    global_step, tr_loss = train(args, train_dataset, model, pretrained_model, tokenizer, labels, pad_token_label_id, lang2id)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
   # Saving best-practices: if you use default names for the model,
