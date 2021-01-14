@@ -31,7 +31,7 @@ LANGS="is,fo"
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
-BPE_DROP=0.2
+BPE_DROP=0
 KL=0.2 
 KL_T=1
 
@@ -59,13 +59,13 @@ ANORM=1e-5
 AMAG=1e-5
 
 TAU=0
-DTAU=0
-VTAU=1
+DTAU=0.8
+VTAU=0.5
 
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
 for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_tlangs${TRAIN_LANGS}_mbped${BPE_DROP}_vtau${VTAU}_tau${TAU}_dtau${DTAU}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_klt${KL_T}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_tlangs${TRAIN_LANGS}_mbped${BPE_DROP}_vtau${VTAU}_tau${TAU}_dtau${DTAU}_adv_nokl_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_klt${KL_T}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_mv_tag_adv.py \
   --data_dir $DATA_DIR \

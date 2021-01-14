@@ -168,6 +168,22 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
   set_seed(args) # Add here for reproductibility (even between python 2 and 3)
 
+  # init adv perturbation from an embedding matrix
+  # initialize delta
+  if isinstance(model, torch.nn.DataParallel):
+      embed_size, embed_dim =  model.module.bert.embeddings.word_embeddings.weight.shape
+  else:
+      embed_size, embed_dim =  model.bert.embeddings.word_embeddings.weight.shape
+
+  if args.adv_init_mag > 0:
+      if args.norm_type == "l2":
+          embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=2)
+      elif args.norm_type == "linf":
+          embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type="inf")
+  else:
+      embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=0)
+  emb_perturb.to(args.device)
+
   cur_epoch = 0
   for _ in train_iterator:
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
@@ -209,20 +225,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       else:
           d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
 
-      if args.adv_init_mag > 0:
-          d_input_mask = dropped_inputs['attention_mask'].to(d_embeds_init)
-          d_input_lengths = torch.sum(d_input_mask, 1)
-          if args.norm_type == "l2":
-              d_delta = torch.zeros_like(d_embeds_init).uniform_(-1,1) * d_input_mask.unsqueeze(2)
-              dims = d_input_lengths * d_embeds_init.size(-1)
-              d_mag = args.adv_init_mag/torch.sqrt(dims)
-              d_delta = (d_delta*d_mag.view(-1, 1, 1)).detach()
-          elif args.norm_type == "linf":
-              #d_delta = torch.zeros_like(d_embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * d_input_mask.unsqueez(2)
-              d_delta = torch.zeros_like(d_embeds_init).normal_(0, 1) * args.adv_init_mag * d_input_mask.unsqueeze(2)
-
-      else:
-          d_delta = torch.zeros_like(d_embeds_init)
+      d_delta = emb_perturb(drop_input_tokens)
 
       for astep in range(args.adv_steps):
           #inputs["inputs_embeds"] = embeds_init
@@ -240,7 +243,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           
           loss = loss / args.adv_steps 
 
-          d_delta.requires_grad_()
           dropped_inputs["inputs_embeds"] = d_delta + d_embeds_init
 
           d_outputs = model(**dropped_inputs)
@@ -270,7 +272,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
             loss = 0.5*loss + 0.5*d_loss
 
           if args.kl_adv:
-            d_delta_grad = torch.autograd.grad(kl, d_delta, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
+            emb_perturb_grad = torch.autograd.grad(kl, emb_perturb, retain_graph=True, create_graph=True, allow_unused=True)[0]
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -279,36 +281,20 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
             loss.backward()
 
           if astep == args.adv_steps - 1:
-              break
+            break
 
           if not args.kl_adv:
-            d_delta_grad = d_delta.grad.clone().detach()
-          if args.norm_type == "l2":
-              # sent level
-              #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
-              # word level
-              d_denorm = torch.norm(d_delta_grad, dim=-1, keepdim=True)
-              d_denorm = torch.clamp(d_denorm, min=1e-8)
-              d_delta = (d_delta + args.adv_lr*d_delta_grad/d_denorm).detach()
-              if args.adv_max_norm > 0:
-                  d_delta_norm = torch.norm(d_delta.view(d_delta.size(0), -1).float(), p=2, dim=1).detach()
-                  exceed_mask = (d_delta_norm > args.adv_max_norm).to(d_embeds_init)
-                  reweights = (args.adv_max_norm / d_delta_norm * exceed_mask + (1-exceed_mask)).view(-1, 1, 1)
-                  d_delta = (d_delta*reweights).detach()
-          elif args.norm_type == "linf":
-              #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
-              d_denorm = torch.norm(d_delta_grad, dim=-1, p=float("inf"), keepdim=True)
-              d_denorm = torch.clamp(d_denorm, min=1e-8)
-              d_delta = (d_delta + args.adv_lr * d_delta_grad / d_denorm).detach()
-              if args.adv_max_norm > 0:
-                  d_delta = torch.clamp(d_delta, -args.adv_max_norm, args.adv_max_norm).detach()
-          else:
-              print("Norm type {} not known".format(args.norm_type))
-              exit()
+            emb_perturb_grad = emb_perturb.weight.grad
+
+          emb_perturb.weight = emb_perturb.weight + args.adv_lr*emb_perturb_grad
+          
           if isinstance(model, torch.nn.DataParallel):
               d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
           else:
               d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
+
+          if args.init_emb_adv:
+              d_delta = emb_perturb(drop_input_tokens)
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -645,7 +631,6 @@ def main():
   parser.add_argument("--adv-max-norm", default=0, type=float)
   parser.add_argument("--norm-type", default="linf", type=str, choices=["l2", "linf"])
   parser.add_argument("--kl_adv", action='store_true')
-
 
   parser.add_argument("--tau", default=0, type=float)
   parser.add_argument("--drop_tau", default=0, type=float)
