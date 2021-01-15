@@ -271,6 +271,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
           if args.kl_adv:
             d_delta_grad = torch.autograd.grad(kl, d_delta, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
+          else:
+            d_delta_grad = torch.autograd.grad(d_loss, d_delta, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -281,8 +283,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           if astep == args.adv_steps - 1:
               break
 
-          if not args.kl_adv:
-            d_delta_grad = d_delta.grad.clone().detach()
           if args.norm_type == "l2":
               # sent level
               #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
