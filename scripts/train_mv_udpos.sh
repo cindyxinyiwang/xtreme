@@ -22,8 +22,8 @@
 REPO=$PWD
 MODEL=${1:-bert-base-multilingual-cased}
 GPU=${2:-0}
-DATA_DIR=${3:-"$SCRATCH/download/"}
-OUT_DIR=${4:-"$SCRATCH/outputs/"}
+DATA_DIR=${3:-"$REPO/download/"}
+OUT_DIR=${4:-"$REPO/outputs/"}
 
 TASK='udpos'
 #LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'

@@ -270,9 +270,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
             loss = 0.5*loss + 0.5*d_loss
 
           if args.kl_adv:
-            emb_perturb_grad = torch.autograd.grad(kl, emb_perturb.weight, retain_graph=True, create_graph=True, allow_unused=True)[0]
+            emb_perturb_grad = torch.autograd.grad(kl, emb_perturb.weight, retain_graph=True, create_graph=False, allow_unused=True)[0]
           else:
-            emb_perturb_grad = torch.autograd.grad(d_loss, emb_perturb.weight, retain_graph=True, create_graph=True, allow_unused=True)[0]
+            emb_perturb_grad = torch.autograd.grad(d_loss, emb_perturb.weight, retain_graph=True, create_graph=False, allow_unused=True)[0]
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
