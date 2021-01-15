@@ -177,11 +177,11 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   if args.adv_init_mag > 0:
       if args.norm_type == "l2":
-          embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=2)
+          emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=2)
       elif args.norm_type == "linf":
-          embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type="inf")
+          emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=float("inf"))
   else:
-      embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=0)
+      emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=0)
   emb_perturb.to(args.device)
 
   cur_epoch = 0
@@ -219,16 +219,14 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
         dropped_inputs["langs"] = dropped_batch[4]
 
       # ============================ Code for adversarial training=============
-      # initialize delta
-      if isinstance(model, torch.nn.DataParallel):
-          d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
-      else:
-          d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
-
-      d_delta = emb_perturb(drop_input_tokens)
-
       for astep in range(args.adv_steps):
-          #inputs["inputs_embeds"] = embeds_init
+          # initialize delta
+          if isinstance(model, torch.nn.DataParallel):
+              d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
+          else:
+              d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
+
+          d_delta = emb_perturb(drop_input_tokens)
 
           outputs = model(**inputs)
           loss = outputs[0]
@@ -272,7 +270,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
             loss = 0.5*loss + 0.5*d_loss
 
           if args.kl_adv:
-            emb_perturb_grad = torch.autograd.grad(kl, emb_perturb, retain_graph=True, create_graph=True, allow_unused=True)[0]
+            emb_perturb_grad = torch.autograd.grad(kl, emb_perturb.weight, retain_graph=True, create_graph=True, allow_unused=True)[0]
+          else:
+            emb_perturb_grad = torch.autograd.grad(d_loss, emb_perturb.weight, retain_graph=True, create_graph=True, allow_unused=True)[0]
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -280,21 +280,10 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           else:
             loss.backward()
 
-          if astep == args.adv_steps - 1:
-            break
-
-          if not args.kl_adv:
-            emb_perturb_grad = emb_perturb.weight.grad
-
-          emb_perturb.weight = emb_perturb.weight + args.adv_lr*emb_perturb_grad
-          
-          if isinstance(model, torch.nn.DataParallel):
-              d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
-          else:
-              d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
-
-          if args.init_emb_adv:
-              d_delta = emb_perturb(drop_input_tokens)
+          #if astep == args.adv_steps - 1:
+          #  break
+          with torch.no_grad():
+            emb_perturb.weight.copy_(emb_perturb.weight + args.adv_lr*emb_perturb_grad.detach())
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
