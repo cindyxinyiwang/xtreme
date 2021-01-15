@@ -22,7 +22,8 @@ MODEL=${1:-bert-base-multilingual-cased}
 GPU=${2:-0}
 DATA_DIR=${3:-"$SCRATCH/download/"}
 OUT_DIR=${4:-"$SCRATCH/outputs/"}
-TRAIN_LANGS="is"
+#TRAIN_LANGS="is"
+TRAIN_LANGS="hi"
 
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -44,5 +45,5 @@ python $REPO/third_party/get_vocab_distance.py \
   --labels $DATA_DIR/labels.txt \
   --train_langs $TRAIN_LANGS \
   --max_seq_length $MAX_LENGTH \
-  --output_file $OUT_DIR/$MODEL_TYPE".json" 
+  --output_file $OUT_DIR/${MODEL_TYPE}_${TRAIN_LANGS}".json" 
 

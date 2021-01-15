@@ -26,8 +26,17 @@ OUT_DIR=${4:-"$SCRATCH/outputs/"}
 TASK='udpos'
 #LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
 #TRAIN_LANGS="en"
-TRAIN_LANGS="is"
-LANGS="is,fo"
+
+#TRAIN_LANGS="is"
+#LANGS="is,fo"
+#TRAIN_LANGS="no_nynorsk"
+#LANGS="no_nynorsk,no_nynorsklia,no_bokmaal"
+#TRAIN_LANGS="fi"
+#LANGS="fi,olo"
+
+TRAIN_LANGS="hi"
+LANGS="hi,bho,mr,ur"
+
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
@@ -55,13 +64,14 @@ else
 fi
 
 TAU=0
-DTAU=0
-VTAU=1
-DMLM=0.1
+DTAU=0.8
+VTAU=0.5
+DMLM=0
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
 for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_tlangs${TRAIN_LANGS}_mbped${BPE_DROP}_dmlm${DMLM}_vtau${VTAU}_tau${TAU}_dtau${DTAU}_kl${KL}_klt${KL_T}_s${SEED}/"
+#OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_dmlm${DMLM}_vtau${VTAU}_dtau${DTAU}_kl${KL}_klt${KL_T}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_vtau${VTAU}_dtau${DTAU}_kl${KL}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_mv_tag.py \
   --data_dir $DATA_DIR \
@@ -90,7 +100,7 @@ python $REPO/third_party/run_mv_tag.py \
   --tau $TAU \
   --drop_tau $DTAU \
   --drop_mlm_p $DMLM \
-  --vocab_dist_filename /pylon5/dbs200003p/xinyiw1/outputs/bert.json \
+  --vocab_dist_filename /pylon5/dbs200003p/xinyiw1/outputs/bert_${TRAIN_LANGS}.json \
   --vocab_dist_tau $VTAU \
   --save_only_best_checkpoint $LC
 done

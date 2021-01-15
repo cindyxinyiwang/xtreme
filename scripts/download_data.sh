@@ -64,10 +64,12 @@ function download_udpos {
     #tar -xzf $base_dir/ud-treebanks-v2.5.tgz
 
     #langs=(af ar bg de el en es et eu fa fi fr he hi hu id it ja kk ko mr nl pt ru ta te th tl tr ur vi yo zh fo is olo bh as)
-    langs=(grc fo is olo bho as)
+    #langs=(grc fo is olo bho as)
+    langs=(no_nynorsklia no_nynorsk no_bokmaal)
     for x in $base_dir/ud-treebanks-v2.5/*/*.conllu; do
         file="$(basename $x)"
-        IFS='_' read -r -a array <<< "$file"
+        #IFS='_' read -r -a array <<< "$file"
+        IFS='-' read -r -a array <<< "$file"
         lang=${array[0]}
         if [[ " ${langs[@]} " =~ " ${lang} " ]]; then
             lang_dir=$out_dir/$lang/

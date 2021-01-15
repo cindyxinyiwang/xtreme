@@ -27,12 +27,12 @@ def tag_results(filename):
   
   df = pd.DataFrame(seeded_results)
   print(df)
-  print(df.mean(axis=1))
+  print(df.mean(axis=0))
   print("ave over random seeds:", df.mean(axis=1).mean())
   
   #print(df.mean(axis=1))
   #print(pd.DataFrame(df, columns=langs).mean(axis=0).mean())
-  df.to_csv(filename+".csv")
+  #df.to_csv(filename+".csv")
 
 def classify_results(filename):
   seeded_results = []

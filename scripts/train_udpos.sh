@@ -25,14 +25,17 @@ DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
 TASK='udpos'
-#export CUDA_VISIBLE_DEVICES=$GPU
-LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
-TRAIN_LANGS="en"
+#LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
+#TRAIN_LANGS="en"
+#TRAIN_LANGS="no_nynorsk"
+#LANGS="no_nynorsk,no_nynorsklia,no_bokmaal"
+TRAIN_LANGS="hi"
+LANGS="hi,bho,mr,ur"
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
-BPE_DROP=0.8
-
+# ran 000,100,111,001
+# to run: 101,011,010,110,
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -51,15 +54,14 @@ else
   GRAD_ACC=4
 fi
 
+BPE_DROP=0.2
+TAU=0
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-#for SEED in 1;
 for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_bped${BPE_DROP}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_bped${BPE_DROP}_tau${TAU}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_tag.py \
-  --do_train \
-  --do_eval \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -72,6 +74,8 @@ python $REPO/third_party/run_tag.py \
   --save_steps 500 \
   --seed $SEED \
   --learning_rate $LR \
+  --do_train \
+  --do_eval \
   --do_predict \
   --predict_langs $LANGS \
   --log_file $OUTPUT_DIR/train.log \
@@ -79,5 +83,6 @@ python $REPO/third_party/run_tag.py \
   --overwrite_output_dir \
   --train_langs $TRAIN_LANGS \
   --bpe_dropout $BPE_DROP \
+  --tau $TAU \
   --save_only_best_checkpoint $LC
 done

@@ -21,18 +21,16 @@
 REPO=$PWD
 MODEL=${1:-bert-base-multilingual-cased}
 GPU=${2:-0}
-DATA_DIR=${3:-"$REPO/download/"}
-OUT_DIR=${4:-"$REPO/outputs/"}
+DATA_DIR=${3:-"$SCRATCH/download/"}
+OUT_DIR=${4:-"$SCRATCH/outputs/"}
 
-export CUDA_VISIBLE_DEVICES=1
 TASK='udpos'
 #LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
 #TRAIN_LANGS="en"
 #TRAIN_LANGS="is"
 #LANGS="is,fo"
-
-TRAIN_LANGS="no_nynorsk"
-LANGS="no_nynorsk,no_nynorsklia,no_bokmaal"
+TRAIN_LANGS="fi"
+LANGS="fi,olo"
 
 NUM_EPOCHS=10
 MAX_LENGTH=128
@@ -40,8 +38,7 @@ LR=2e-5
 BPE_DROP=0.2
 KL=0.2 
 KL_T=1
-# ran 000,100,111,001
-# to run: 101,011,010,110,
+
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -60,12 +57,21 @@ else
   GRAD_ACC=4
 fi
 
+ALR=1e-3
+ASTEP=1
+ANORM=1e-5
+AMAG=1e-5
+
+TAU=0
+DTAU=0
+VTAU=1
+
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 2 3 4 5;
+for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_wadv_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_vtau${VTAU}_dtau${DTAU}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_mv_tag_wadv.py \
+python $REPO/third_party/run_mv_tag_adv.py \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -89,9 +95,13 @@ python $REPO/third_party/run_mv_tag_wadv.py \
   --bpe_dropout $BPE_DROP \
   --kl_weight $KL \
   --kl_t $KL_T \
-  --adv-lr 1e-3 \
-  --adv-steps 1 \
-  --adv-max-norm 1e-5 \
-  --adv-init-mag 1e-5 \
+  --adv-lr $ALR \
+  --adv-steps $ASTEP \
+  --adv-max-norm $ANORM \
+  --adv-init-mag $AMAG \
+  --tau $TAU \
+  --drop_tau $DTAU \
+  --vocab_dist_filename bert_${TRAIN_LANGS}.json \
+  --vocab_dist_tau $VTAU \
   --save_only_best_checkpoint $LC
 done
