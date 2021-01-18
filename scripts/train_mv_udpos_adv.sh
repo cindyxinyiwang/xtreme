@@ -24,6 +24,7 @@ GPU=${2:-0}
 DATA_DIR=${3:-"$REPO/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
+export CUDA_VISIBLE_DEVICES=0
 TASK='udpos'
 #LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
 #TRAIN_LANGS="en"
@@ -63,11 +64,11 @@ ANORM=1e-5
 AMAG=1e-5
 
 TAU=0
-DTAU=0.8
+DTAU=0
 VTAU=0.5
 
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 1 2 3 4 5;
+for SEED in 2 3 4 5;
 do
 OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_vtau${VTAU}_dtau${DTAU}_wadv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
 mkdir -p $OUTPUT_DIR

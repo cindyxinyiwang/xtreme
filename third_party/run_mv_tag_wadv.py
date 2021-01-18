@@ -143,7 +143,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
-  if args.vocab_dist_filename is not None:
+  if args.vocab_dist_filename is not None and args.drop_tau > 0:
     # load vocab dist sampling for perturbation
     vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
     vocabs = vocab_dist_data['vocab']
@@ -175,14 +175,18 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   else:
       embed_size, embed_dim =  model.bert.embeddings.word_embeddings.weight.shape
 
+  emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id)
+  torch.nn.init.normal_(emb_perturb.weight, mean=0, std=embed_dim ** -0.5)
+  torch.nn.init.constant_(emb_perturb.weight[tokenizer.pad_token_id], 0)
+
+  emb_perturb.to(args.device)
   if args.adv_init_mag > 0:
       if args.norm_type == "l2":
-          emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=2)
+          d_denorm = torch.norm(emb_perturb.weight, dim=-1, keepdim=True, p=2)
       elif args.norm_type == "linf":
-          emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=float("inf"))
-  else:
-      emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=0)
-  emb_perturb.to(args.device)
+          d_denorm = torch.norm(emb_perturb.weight, dim=-1, keepdim=True, p=float("inf"))
+      with torch.no_grad():
+          emb_perturb.weight.div_(d_denorm)
 
   cur_epoch = 0
   for _ in train_iterator:
@@ -283,7 +287,25 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           #if astep == args.adv_steps - 1:
           #  break
           with torch.no_grad():
-            emb_perturb.weight.copy_(emb_perturb.weight + args.adv_lr*emb_perturb_grad.detach())
+            if args.adv_max_norm > 0:
+              if args.norm_type == "l2":
+                d_denorm = torch.norm(emb_perturb_grad, dim=-1, keepdim=True, p=2)
+                p_denorm = torch.norm(emb_perturb.weight, dim=-1, keepdim=True, p=2)
+              else:
+                d_denorm = torch.norm(emb_perturb_grad, dim=-1, keepdim=True, p=float("inf"))
+                p_denorm = torch.norm(emb_perturb.weight, dim=-1, keepdim=True, p=float("inf"))
+              d_denorm = torch.clamp(d_denorm, min=1e-8)
+              emb_perturb_grad.div_(d_denorm).mul_(p_denorm)
+
+              if args.norm_type == "l2":
+                emb_perturb.weight.copy_(emb_perturb.weight + args.adv_lr*emb_perturb_grad.detach())
+                emb_norm = torch.norm(emb_perturb.weight, p=2, dim=-1, keepdim=True)
+                emb_perturb.weight.div_(emb_norm).mul_(args.adv_max_norm)
+              else:
+                normed = torch.clamp(emb_perturb.weight + args.adv_lr*emb_perturb_grad.detach(), -args.adv_max_norm, args.adv_max_norm)
+                emb_perturb.weight.copy_(normed)
+            else:
+              emb_perturb.weight.copy_(emb_perturb.weight + args.adv_lr*emb_perturb_grad.detach())
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
