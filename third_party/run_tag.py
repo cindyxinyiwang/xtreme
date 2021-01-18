@@ -197,7 +197,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
           # Log metrics
           if args.local_rank == -1 and args.evaluate_during_training:
             # Only evaluate on single GPU otherwise metrics may not average well
-            results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.train_langs, lang2id=lang2id)
+            results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", lang=args.eval_langs, lang2id=lang2id)
             for key, value in results.items():
               tb_writer.add_scalar("eval_{}".format(key), value, global_step)
           tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
@@ -206,7 +206,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
 
         if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
           if args.save_only_best_checkpoint:
-            result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
+            result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.eval_langs, lang2id=lang2id)
             if result["f1"] > best_score:
               logger.info("result['f1']={} > best_score={}".format(result["f1"], best_score))
               best_score = result["f1"]
@@ -552,6 +552,7 @@ def main():
   parser.add_argument("--server_ip", type=str, default="", help="For distant debugging.")
   parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
   parser.add_argument("--predict_langs", type=str, default="en", help="prediction languages")
+  parser.add_argument("--eval_langs", type=str, default=None, help="prediction languages")
   parser.add_argument("--train_langs", default="en", type=str,
             help="The languages in the training sets.")
   parser.add_argument("--log_file", type=str, default=None, help="log file")
@@ -590,6 +591,9 @@ def main():
     torch.distributed.init_process_group(backend="nccl")
     args.n_gpu = 1
   args.device = device
+
+  if args.eval_langs is None:
+      args.eval_langs = args.train_langs
 
   # Setup logging
   logging.basicConfig(handlers = [logging.FileHandler(args.log_file), logging.StreamHandler()],
@@ -692,7 +696,7 @@ def main():
       global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
       model = model_class.from_pretrained(checkpoint)
       model.to(args.device)
-      result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.train_langs, lang2id=lang2id)
+      result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step, lang=args.eval_langs, lang2id=lang2id)
       if result["f1"] > best_f1:
         best_checkpoint = checkpoint
         best_f1 = result["f1"]
