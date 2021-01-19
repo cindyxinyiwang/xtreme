@@ -171,11 +171,15 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   cur_epoch = 0
   for _ in train_iterator:
+    if args.word_scramble > 0:
+      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble)
+      concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+
+      train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
+      train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
-    if cur_epoch == args.update_pretrained_epoch and args.optimizer == 'RecAdam':
-      logger.info(" Update pretrained param at epoch {}".format(cur_epoch))
-      optimizer.update_pretrained()
     for step, concat_batch in enumerate(epoch_iterator):
       model.train()
       batch, dropped_batch = concat_batch
@@ -485,49 +489,35 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_drop=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  if bpe_drop > 0:
-    cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}_drop{}".format(mode, lang,
-      list(filter(None, args.model_name_or_path.split("/"))).pop(),
-      str(args.max_seq_length), bpe_drop))
-  else:
-    cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
-      list(filter(None, args.model_name_or_path.split("/"))).pop(),
-      str(args.max_seq_length)))
-  if os.path.exists(cached_features_file) and not args.overwrite_cache:
-    logger.info("Loading features from cached file %s", cached_features_file)
-    features = torch.load(cached_features_file)
-  else:
-    langs = lang.split(',')
-    logger.info("all languages = {}".format(lang))
-    features = []
-    for lg in langs:
-      data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
-      logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
-      examples = read_examples_from_file(data_file, lg, lang2id)
-      features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
-                          cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                          cls_token=tokenizer.cls_token,
-                          cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                          sep_token=tokenizer.sep_token,
-                          sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
-                          pad_on_left=bool(args.model_type in ["xlnet"]),
-                          pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                          pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-                          pad_token_label_id=pad_token_label_id,
-                          lang=lg,
-                          bpe_dropout=bpe_drop,
-                          )
-      features.extend(features_lg)
-    if args.local_rank in [-1, 0]:
-      logger.info("Saving features into cached file {}, len(features)={}".format(cached_features_file, len(features)))
-      torch.save(features, cached_features_file)
+  langs = lang.split(',')
+  logger.info("all languages = {}".format(lang))
+  features = []
+  for lg in langs:
+    data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
+    logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
+    examples = read_examples_from_file(data_file, lg, lang2id)
+    features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
+                        cls_token_at_end=bool(args.model_type in ["xlnet"]),
+                        cls_token=tokenizer.cls_token,
+                        cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
+                        sep_token=tokenizer.sep_token,
+                        sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
+                        pad_on_left=bool(args.model_type in ["xlnet"]),
+                        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+                        pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
+                        pad_token_label_id=pad_token_label_id,
+                        lang=lg,
+                        bpe_dropout=bpe_dropout,
+                        word_scramble=word_scramble,
+                        )
+    features.extend(features_lg)
 
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
@@ -652,6 +642,7 @@ def main():
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
 
   parser.add_argument("--bpe_dropout", default=0, type=float)
+  parser.add_argument("--word_scramble", default=0, type=float)
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
   parser.add_argument("--fix_class", action='store_true')
@@ -897,62 +888,6 @@ def main():
         infile = os.path.join(args.data_dir, lang, "dev.{}".format(args.model_name_or_path))
         idxfile = infile + '.idx'
         save_predictions(args, predictions, output_test_predictions_file, infile, idxfile)
-
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
-  if args.local_rank not in [-1, 0] and not evaluate:
-    torch.distributed.barrier()
-
-  # Load data features from cache or dataset file
-  bpe_dropout = args.bpe_dropout
-  if mode != 'train': bpe_dropout = 0
-  assert bpe_dropout > 0
-  langs = lang.split(',')
-  logger.info("all languages = {}".format(lang))
-  features = []
-  for lg in langs:
-    data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
-    logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
-    examples = read_examples_from_file(data_file, lg, lang2id)
-    features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
-                        cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                        cls_token=tokenizer.cls_token,
-                        cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                        sep_token=tokenizer.sep_token,
-                        sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
-                        pad_on_left=bool(args.model_type in ["xlnet"]),
-                        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                        pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-                        pad_token_label_id=pad_token_label_id,
-                        lang=lg,
-                        bpe_dropout=bpe_dropout,
-                        )
-    features.extend(features_lg)
-
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
-  if args.local_rank == 0 and not evaluate:
-    torch.distributed.barrier()
-
-  if few_shot > 0 and mode == 'train':
-    logger.info("Original no. of examples = {}".format(len(features)))
-    features = features[: few_shot]
-    logger.info('Using few-shot learning on {} examples'.format(len(features)))
-
-  # Convert to Tensors and build dataset
-  all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-  all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
-  all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-  all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-  if args.model_type == 'xlm' and features[0].langs is not None:
-    all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
-    logger.info('all_langs[0] = {}'.format(all_langs[0]))
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
-  else:
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-  return dataset
-
 
 def save_predictions(args, predictions, output_file, text_file, idx_file, output_word_prediction=False):
   # Save predictions
