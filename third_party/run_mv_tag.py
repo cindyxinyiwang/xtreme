@@ -144,7 +144,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
-  if args.vocab_dist_filename is not None:
+  if args.vocab_dist_filename is not None and args.drop_tau > 0:
     # load vocab dist sampling for perturbation
     vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
     vocabs = vocab_dist_data['vocab']
@@ -237,6 +237,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       if args.model_type == "xlm":
         dropped_inputs["langs"] = dropped_batch[4]
 
+      dropped_inputs["noise"] = args.noised
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_kept_label_mask = dropped_outputs[-2]
@@ -651,6 +652,7 @@ def main():
   parser.add_argument("--vocab_dist_filename", type=str, default=None)
   parser.add_argument("--vocab_dist_tau", default=1, type=float)
   parser.add_argument("--drop_mlm_p", default=0, type=float)
+  parser.add_argument("--noised", default=0, type=float)
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
