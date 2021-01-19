@@ -22,6 +22,7 @@ import logging
 import os
 from io import open
 from transformers import XLMTokenizer
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +336,8 @@ def convert_examples_to_features(examples,
                  sequence_a_segment_id=0,
                  mask_padding_with_zero=True,
                  lang='en',
-                 bpe_dropout=0):
+                 bpe_dropout=0,
+                 word_scramble=0):
   """ Loads a data file into a list of `InputBatch`s
     `cls_token_at_end` define the location of the CLS token:
       - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -359,6 +361,8 @@ def convert_examples_to_features(examples,
         word_tokens = tokenizer.tokenize(word, dropout=bpe_dropout)
       if len(word) != 0 and len(word_tokens) == 0:
         word_tokens = [tokenizer.unk_token]
+      if word_scramble > 0 and random.random() < word_scramble:
+        random.shuffle(word_tokens)
       tokens.extend(word_tokens)
       # Use the real label id for the first token of the word, and padding ids for the remaining tokens
       label_ids.extend([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
