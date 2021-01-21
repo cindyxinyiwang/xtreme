@@ -134,6 +134,10 @@ def main():
   train_dataset, input_id_set = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0)
   train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.2)
   input_id_set = input_id_set.union(input_id_set_drop)
+  train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.1)
+  input_id_set = input_id_set.union(input_id_set_drop)
+  train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.3)
+  input_id_set = input_id_set.union(input_id_set_drop)
   vocab_distance = {}
   input_id_set = [ i for i in list(input_id_set) if i > 104 ]
   print(len(input_id_set))

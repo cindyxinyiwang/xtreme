@@ -126,7 +126,10 @@ def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_
       corrupt_words = tokens[corrupt_pos].view(-1)
       corrupt_words_dist = []
       for w in corrupt_words.cpu().numpy():
-        corrupt_words_dist.append(vocab_dist[w])
+        if w in vocab_dist:
+          corrupt_words_dist.append(vocab_dist[w])
+        else:
+          corrupt_words_dist.append(vocab_dist[unk_token_id])
       corrupt_words_dist = torch.FloatTensor(corrupt_words_dist).to(tokens.device)
       # num_words x 1
       sampled_words_indices = torch.distributions.Categorical(corrupt_words_dist).sample().view(-1, 1)

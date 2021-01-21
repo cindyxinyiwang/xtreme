@@ -337,7 +337,11 @@ def convert_examples_to_features(examples,
                  mask_padding_with_zero=True,
                  lang='en',
                  bpe_dropout=0,
-                 word_scramble=0):
+                 word_swap=0,
+                 sample_bpe_dropout=0,
+                 word_order_scramble=0,
+                 word_scramble=0,
+                 word_scramble_inside=False):
   """ Loads a data file into a list of `InputBatch`s
     `cls_token_at_end` define the location of the CLS token:
       - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -355,6 +359,8 @@ def convert_examples_to_features(examples,
     tokens = []
     label_ids = []
     for word, label in zip(example.words, example.labels):
+      if sample_bpe_dropout > 0:
+        bpe_dropout = random.uniform(0, sample_bpe_dropout)
       if isinstance(tokenizer, XLMTokenizer):
         word_tokens = tokenizer.tokenize(word, lang=lang, dropout=bpe_dropout)
       else:
@@ -362,11 +368,26 @@ def convert_examples_to_features(examples,
       if len(word) != 0 and len(word_tokens) == 0:
         word_tokens = [tokenizer.unk_token]
       if word_scramble > 0 and random.random() < word_scramble:
-        random.shuffle(word_tokens)
-      tokens.extend(word_tokens)
+        if word_scramble_inside and len(word_tokens) > 1:
+          t = word_tokens[1:-1]
+          random.shuffle(t)
+          word_tokens = [word_tokens[0]] + t + [word_tokens[-1]]
+        else:
+          random.shuffle(word_tokens)
+      #tokens.extend(word_tokens)
+      tokens.append(word_tokens)
       # Use the real label id for the first token of the word, and padding ids for the remaining tokens
-      label_ids.extend([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
+      #label_ids.extend([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
+      label_ids.append([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
 
+    if word_swap > 0 and random.random() < word_swap and len(label_ids)>1:
+      idx = range(len(label_ids))
+      i1, i2 = random.sample(idx, 2)
+      tokens[i1], tokens[i2] = tokens[i2], tokens[i1]
+      label_ids[i1], label_ids[i2] = label_ids[i2], label_ids[i1]
+
+    tokens = [item for sublist in tokens for item in sublist]
+    label_ids = [item for sublist in label_ids for item in sublist]
     # Account for [CLS] and [SEP] with "- 2" and with "- 3" for RoBERTa.
     special_tokens_count = 3 if sep_token_extra else 2
     if len(tokens) > max_seq_length - special_tokens_count:

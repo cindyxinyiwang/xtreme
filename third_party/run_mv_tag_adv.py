@@ -143,7 +143,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
-  if args.vocab_dist_filename is not None:
+  if args.vocab_dist_filename is not None and args.drop_tau > 0:
     # load vocab dist sampling for perturbation
     vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
     vocabs = vocab_dist_data['vocab']
@@ -269,10 +269,12 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           else:
             loss = 0.5*loss + 0.5*d_loss
 
-          if args.kl_adv:
-            d_delta_grad = torch.autograd.grad(kl, d_delta, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
-          else:
-            d_delta_grad = torch.autograd.grad(d_loss, d_delta, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
+          if args.adv_type == "kl":
+            d_delta_grad = torch.autograd.grad(kl, d_delta, retain_graph=True, create_graph=False, allow_unused=True)[0]
+          elif args.adv_type == "d_loss":
+            d_delta_grad = torch.autograd.grad(d_loss, d_delta, retain_graph=True, create_graph=False, allow_unused=True)[0]
+          elif args.adv_type == "loss":
+            d_delta_grad = torch.autograd.grad(loss, d_delta, retain_graph=True, create_graph=False, allow_unused=True)[0]
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -645,7 +647,7 @@ def main():
   parser.add_argument("--adv-lr", default=0, type=float)
   parser.add_argument("--adv-max-norm", default=0, type=float)
   parser.add_argument("--norm-type", default="linf", type=str, choices=["l2", "linf"])
-  parser.add_argument("--kl_adv", action='store_true')
+  parser.add_argument("--adv_type", default="d_loss", type=str, choices=["d_loss", "kl", "loss"])
 
 
   parser.add_argument("--tau", default=0, type=float)

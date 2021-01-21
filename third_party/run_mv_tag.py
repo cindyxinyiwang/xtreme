@@ -171,8 +171,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   cur_epoch = 0
   for _ in train_iterator:
-    if args.word_scramble > 0:
-      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble)
+    if args.word_scramble > 0 or args.sample_bpe_dropout > 0 or args.word_swap > 0:
+      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble, sample_bpe_dropout=args.sample_bpe_dropout)
       concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
       train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
@@ -490,7 +490,7 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, sample_bpe_dropout=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -516,7 +516,10 @@ def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2
                         pad_token_label_id=pad_token_label_id,
                         lang=lg,
                         bpe_dropout=bpe_dropout,
+                        sample_bpe_dropout=sample_bpe_dropout,
                         word_scramble=word_scramble,
+                        word_scramble_inside=args.word_scramble_inside,
+                        word_swap=args.word_swap,
                         )
     features.extend(features_lg)
 
@@ -643,7 +646,10 @@ def main():
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
 
   parser.add_argument("--bpe_dropout", default=0, type=float)
+  parser.add_argument("--sample_bpe_dropout", default=0, type=float)
+  parser.add_argument("--word_swap", default=0, type=float)
   parser.add_argument("--word_scramble", default=0, type=float)
+  parser.add_argument("--word_scramble_inside", default=0, type=float)
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
   parser.add_argument("--fix_class", action='store_true')
