@@ -22,8 +22,6 @@ import glob
 import logging
 import os
 import random
-import json
-import scipy
 
 import numpy as np
 import torch
@@ -162,24 +160,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
       model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
     )
 
-  if args.vocab_dist_filename is not None and args.interpolate_tau > 0:
-    # load vocab dist sampling for perturbation
-    print("loading {}...".format(args.vocab_dist_filename))
-    vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
-    vocabs = vocab_dist_data['vocab']
-    constraint_vocabs_size = len(vocabs)
-    vocab_dist = vocab_dist_data['vocab_distance']
-    vocabs = torch.LongTensor(vocabs).view(1, -1)
-    new_vocab_dist = {}
-    for k, v in vocab_dist.items():
-      # normalize the sample prob
-      new_vocab_dist[int(k)] = scipy.special.softmax([-float(vi)/args.vocab_dist_tau for vi in v])
-    new_vocab_dist[tokenizer.vocab.get(tokenizer.unk_token)] = [1/constraint_vocabs_size for _ in range(constraint_vocabs_size)]
-    vocab_dist = new_vocab_dist
-  else:
-    vocabs, vocab_dist = None, None
-
-
   # Train!
   logger.info("***** Running training *****")
   logger.info("  Num examples = %d", len(concat_train_dataset))
@@ -217,22 +197,10 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
     epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
   )
   set_seed(args)  # Added here for reproductibility
-  cur_epoch = 0
   for _ in train_iterator:
-    cur_epoch += 1
-    if args.interpolate:
-      assert args.sample_bpe_dropout > 0
     if args.sample_bpe_dropout > 0:
-      if cur_epoch == (args.num_train_epochs//2+1)  and args.sample_bpe_dropout_end > 0:
-        print("switching to bpe dropout: ", args.sample_bpe_dropout_end)
-        args.sample_bpe_dropout = args.sample_bpe_dropout_end
-
       dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout)
-      if args.interpolate:
-        mix_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout)
-        concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset, mix_train_dataset)
-      else:
-        concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+      concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
       train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
       train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
@@ -246,92 +214,140 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
         continue
 
       model.train()
-      if args.interpolate:
-        batch, dropped_batch, mix_batch = concat_batch
-      else:
-        batch, dropped_batch = concat_batch
+      batch, dropped_batch = concat_batch
 
-      batch = tuple(t.to(args.device) for t in batch)
-      inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
-      if args.model_type != "distilbert":
-        inputs["token_type_ids"] = (
-          batch[2] if args.model_type in ["bert"] else None
-        )  # XLM don't use segment_ids
-      if args.model_type == "xlm":
-        inputs["langs"] = batch[4]
-      outputs = model(**inputs)
-      loss = outputs[0]
-      logits = outputs[-1]
-
-      if args.interpolate or args.interpolate_tau:
-        if args.interpolate:
-          dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-          dropped_inputs = {"attention_mask": dropped_batch[1],
-                "labels": dropped_batch[3]}
-          mix_inputs = mix_batch[0].to(args.device)
-          drop_len = dropped_batch[0].size(1)
-          mix_len = mix_inputs.size(1)
-          if mix_len > drop_len:
-            mix_inputs = mix_batch[0][:,:drop_len]
-          elif mix_len < drop_len:
-            mix_inputs = torch.cat([mix_batch[0], dropped_batch[0][:,mix_len-drop_len:]], dim=1)
-        else:
-          mix_inputs = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.interpolate_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs)
-          mix_inputs = mix_inputs.to(args.device)
-          dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-          dropped_inputs = {"attention_mask": dropped_batch[1],
-                "labels": dropped_batch[3]}
-         
-        if isinstance(model, torch.nn.DataParallel):                               
-            emb = model.module.bert.embeddings.word_embeddings                     
-        else:                                                                      
-            emb = model.bert.embeddings.word_embeddings                            
-        mix_embeds = emb(mix_inputs)                                       
-        drop_embeds = emb(dropped_batch[0])                                        
-        mix_p = random.uniform(0, 1)                                                      
-        dropped_inputs["inputs_embeds"] = mix_embeds*mix_p + drop_embeds*(1-mix_p)        
-        dropped_inputs["input_ids"] = None  
+      if args.drop_tau > 0:
+        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs)
+        drop_input_tokens = drop_input_tokens.to(args.device)
       else:
-        dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-        dropped_inputs = {"input_ids": dropped_batch[0],
-              "attention_mask": dropped_batch[1],
-              "labels": dropped_batch[3]}
-        #      "reduction": "none"}
+        drop_input_tokens = dropped_batch[0].to(args.device)
+
+      batch = tuple(t.to(args.device) for t in batch if t is not None)
+      dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+      inputs = {"input_ids": batch[0],
+             "attention_mask": batch[1],
+            "labels": batch[3]}
+      dropped_inputs = {"attention_mask": dropped_batch[1],
+            "labels": dropped_batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
+        inputs["token_type_ids"] = batch[2] if args.model_type in ["bert", "xlnet"] else None
         dropped_inputs["token_type_ids"] = dropped_batch[2] if args.model_type in ["bert", "xlnet"] else None
 
       if args.model_type == "xlm":
+        inputs["langs"] = batch[4]
         dropped_inputs["langs"] = dropped_batch[4]
 
-      dropped_outputs = model(**dropped_inputs)
-      dropped_loss = dropped_outputs[0]
-      dropped_logits = dropped_outputs[-1]
-
-      if args.kl_weight > 0:
-        prob = torch.nn.functional.softmax(logits/args.kl_t, dim=1)
-        dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits, dim=1)
-        if len(prob) > len(dropped_log_prob):
-          prob = prob[:len(dropped_log_prob)]
-        elif len(prob) < len(dropped_log_prob):
-          dropped_log_prob = dropped_log_prob[:len(prob)]
-        kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
-        kl = kl_loss(dropped_log_prob, prob)
-        loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl
+      # ============================ Code for adversarial training=============
+      # initialize delta
+      if isinstance(model, torch.nn.DataParallel):
+          d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
       else:
-        loss = 0.5*loss + 0.5*dropped_loss
+          d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
 
-      if args.n_gpu > 1:
-        loss = loss.mean()  # mean() to average on multi-gpu parallel training
-      if args.gradient_accumulation_steps > 1:
-        loss = loss / args.gradient_accumulation_steps
+      if args.adv_init_mag > 0:
+          d_input_mask = dropped_inputs['attention_mask'].to(d_embeds_init)
+          d_input_lengths = torch.sum(d_input_mask, 1)
+          if args.norm_type == "l2":
+              d_delta = torch.zeros_like(d_embeds_init).uniform_(-1,1) * d_input_mask.unsqueeze(2)
+              dims = d_input_lengths * d_embeds_init.size(-1)
+              d_mag = args.adv_init_mag/torch.sqrt(dims)
+              d_delta = (d_delta*d_mag.view(-1, 1, 1)).detach()
+          elif args.norm_type == "linf":
+              #d_delta = torch.zeros_like(d_embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * d_input_mask.unsqueez(2)
+              d_delta = torch.zeros_like(d_embeds_init).normal_(0, 1) * args.adv_init_mag * d_input_mask.unsqueeze(2)
 
-      if args.fp16:
-        with amp.scale_loss(loss, optimizer) as scaled_loss:
-          scaled_loss.backward()
       else:
-        loss.backward()
+          d_delta = torch.zeros_like(d_embeds_init)
+
+      for astep in range(args.adv_steps):
+          #inputs["inputs_embeds"] = embeds_init
+
+          outputs = model(**inputs)
+          loss = outputs[0]
+          kept_label_mask = outputs[-2]
+          logits = outputs[-1]
+
+          if args.n_gpu > 1:
+            # mean() to average on multi-gpu parallel training
+            loss = loss.mean()
+          if args.gradient_accumulation_steps > 1:
+            loss = loss / args.gradient_accumulation_steps
+          
+          loss = loss / args.adv_steps 
+
+          d_delta.requires_grad_()
+          dropped_inputs["inputs_embeds"] = d_delta + d_embeds_init
+
+          d_outputs = model(**dropped_inputs)
+          d_loss = d_outputs[0]
+          d_kept_label_mask = d_outputs[-2]
+          d_logits = d_outputs[-1]
+
+          if args.n_gpu > 1:
+            # mean() to average on multi-gpu parallel training
+            d_loss = d_loss.mean()
+          if args.gradient_accumulation_steps > 1:
+            d_loss = d_loss / args.gradient_accumulation_steps
+          
+          d_loss = d_loss / args.adv_steps 
+
+          if args.kl_weight > 0:
+            prob = torch.nn.functional.softmax(logits/args.kl_t, dim=1)
+            dropped_log_prob = torch.nn.functional.log_softmax(d_logits, dim=1)
+            if len(prob) > len(dropped_log_prob):
+              prob = prob[:len(dropped_log_prob)]
+            elif len(prob) < len(dropped_log_prob):
+              dropped_log_prob = dropped_log_prob[:len(prob)]
+            kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+            kl = kl_loss(dropped_log_prob, prob)
+            loss = 0.5*loss + 0.5*d_loss + args.kl_weight*kl / args.adv_steps
+          else:
+            loss = 0.5*loss + 0.5*d_loss
+
+          if args.adv_type == "kl":
+            d_delta_grad = torch.autograd.grad(kl, d_delta, retain_graph=True, create_graph=False, allow_unused=True)[0]
+          elif args.adv_type == "d_loss":
+            d_delta_grad = torch.autograd.grad(d_loss, d_delta, retain_graph=True, create_graph=False, allow_unused=True)[0]
+          elif args.adv_type == "loss":
+            d_delta_grad = torch.autograd.grad(loss, d_delta, retain_graph=True, create_graph=False, allow_unused=True)[0]
+
+          if args.fp16:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+              scaled_loss.backward()
+          else:
+            loss.backward()
+
+          if astep == args.adv_steps - 1:
+              break
+
+          if args.norm_type == "l2":
+              # sent level
+              #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
+              # word level
+              d_denorm = torch.norm(d_delta_grad, dim=-1, keepdim=True)
+              d_denorm = torch.clamp(d_denorm, min=1e-8)
+              d_delta = (d_delta + args.adv_lr*d_delta_grad/d_denorm).detach()
+              if args.adv_max_norm > 0:
+                  d_delta_norm = torch.norm(d_delta.view(d_delta.size(0), -1).float(), p=2, dim=1).detach()
+                  exceed_mask = (d_delta_norm > args.adv_max_norm).to(d_embeds_init)
+                  reweights = (args.adv_max_norm / d_delta_norm * exceed_mask + (1-exceed_mask)).view(-1, 1, 1)
+                  d_delta = (d_delta*reweights).detach()
+          elif args.norm_type == "linf":
+              #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
+              d_denorm = torch.norm(d_delta_grad, dim=-1, p=float("inf"), keepdim=True)
+              d_denorm = torch.clamp(d_denorm, min=1e-8)
+              d_delta = (d_delta + args.adv_lr * d_delta_grad / d_denorm).detach()
+              if args.adv_max_norm > 0:
+                  d_delta = torch.clamp(d_delta, -args.adv_max_norm, args.adv_max_norm).detach()
+          else:
+              print("Norm type {} not known".format(args.norm_type))
+              exit()
+          if isinstance(model, torch.nn.DataParallel):
+              d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
+          else:
+              d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -603,7 +619,7 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
     dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
   return dataset
 
-def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0, sample_bpe_dropout=0, word_scramble=0):
+def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0, sample_bpe_dropout=0):
   # Make sure only the first process in distributed training process the 
   # dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -642,7 +658,6 @@ def load_examples(args, task, tokenizer, split='train', language='en', lang2id=N
     lang2id=lang2id,
     bpe_dropout=bpe_drop,
     sample_bpe_dropout=sample_bpe_dropout,
-    word_scramble=word_scramble,
   )
 
   # Make sure only the first process in distributed training process the 
@@ -818,15 +833,19 @@ def main():
   parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
 
   parser.add_argument("--sample_bpe_dropout", default=0, type=float)
-  parser.add_argument("--sample_bpe_dropout_end", default=0, type=float)
   parser.add_argument("--bpe_dropout", default=0, type=float)
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
 
-  parser.add_argument("--interpolate", default=0, type=float)
-  parser.add_argument("--interpolate_tau", default=0, type=float)
-  parser.add_argument("--vocab_dist_filename", default=None, type=str)
-  parser.add_argument("--vocab_dist_tau", default=1, type=float)
+  parser.add_argument("--drop_tau", default=0, type=float)
+  parser.add_argument("--adv-init-mag", default=0, type=float)
+  parser.add_argument("--adv-steps", default=1, type=int)
+  parser.add_argument("--adv-lr", default=0, type=float)
+  parser.add_argument("--adv-max-norm", default=0, type=float)
+  parser.add_argument("--norm-type", default="linf", type=str, choices=["l2", "linf"])
+  parser.add_argument("--adv_type", default="d_loss", type=str, choices=["d_loss", "kl", "loss"])
+
+
   args = parser.parse_args()
 
   if (

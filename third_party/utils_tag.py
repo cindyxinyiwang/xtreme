@@ -367,7 +367,7 @@ def convert_examples_to_features(examples,
         word_tokens = tokenizer.tokenize(word, dropout=bpe_dropout)
       if len(word) != 0 and len(word_tokens) == 0:
         word_tokens = [tokenizer.unk_token]
-      if word_scramble > 0 and random.random() < word_scramble:
+      if word_scramble > 0 and random.uniform(0, 1) < word_scramble:
         if word_scramble_inside and len(word_tokens) > 1:
           t = word_tokens[1:-1]
           random.shuffle(t)
