@@ -3,6 +3,7 @@ import csv
 import json
 import logging
 from transformers import XLMTokenizer
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,8 @@ def convert_examples_to_features(
   mask_padding_with_zero=True,
   lang2id=None,
   bpe_dropout=0,
+  sample_bpe_dropout=0,
+  word_scramble=0,
 ):
   """
   Loads a data file into a list of ``InputFeatures``
@@ -118,11 +121,49 @@ def convert_examples_to_features(
     # if is_tf_dataset:
     #   example = processor.get_example_from_tensor_dict(example)
     #   example = processor.tfds_map(example)
+    if sample_bpe_dropout > 0:
+        bpe_dropout = random.uniform(0, sample_bpe_dropout)
+    if word_scramble > 0 and random.uniform(0, 1) < word_scramble:
+        action = random.choice(["switch", "edit_a", "edit_b"])
+        if action == "switch":
+          example.text_a, example.text_b = example.text_b, example.text_a
+        elif action == "edit_a":
+          text_a = example.text_a.split()
+          widx = random.randint(0, len(text_a)-1)
+          w = text_a[widx]
+          if len(w) > 1:
+            wmid = [i for i in w[1:-1]]
+            random.shuffle(wmid)
+            text_a[widx] = "".join( [w[0]] + wmid + [w[1]])
+            text_a = " ".join(text_a)
+          text_b = example.text_b
+        elif action == "edit_b":
+          text_b = example.text_b.split()
+          widx = random.randint(0, len(text_b)-1)
+          w = text_b[widx]
+          if len(w) > 1:
+            wmid = [i for i in w[1:-1]]
+            random.shuffle(wmid)
+            text_b[widx] = "".join( [w[0]] + wmid + [w[1]])
+            text_b = " ".join(text_b)
+          text_a = example.text_a
 
-    if isinstance(tokenizer, XLMTokenizer):
-      inputs = tokenizer.encode_plus(example.text_a, example.text_b, add_special_tokens=True, max_length=max_length, lang=example.language, dropout=bpe_dropout)
+        #text_a = example.text_a.split()
+        #text_a_len = len(text_a)
+        #text_a = text_a[text_a_len//2:] + text_a[:text_a_len//2]
+        #text_a = " ".join(text_a)
+
+        #text_b = example.text_b.split()
+        #text_b_len = len(text_b)
+        #text_b = text_b[text_b_len//2:] + text_b[:text_b_len//2]
+        #text_b = " ".join(text_b)
     else:
-      inputs = tokenizer.encode_plus(example.text_a, example.text_b, add_special_tokens=True, max_length=max_length, dropout=bpe_dropout)
+        text_a = example.text_a
+        text_b = example.text_b
+    if isinstance(tokenizer, XLMTokenizer):
+      inputs = tokenizer.encode_plus(text_a, text_b, add_special_tokens=True, max_length=max_length, lang=example.language, dropout=bpe_dropout, sample_bpe_dropout=sample_bpe_dropout)
+    else:
+      inputs = tokenizer.encode_plus(text_a, text_b, add_special_tokens=True, max_length=max_length, dropout=bpe_dropout, sample_bpe_dropout=sample_bpe_dropout)
     
     input_ids, token_type_ids = inputs["input_ids"], inputs["token_type_ids"]
 
