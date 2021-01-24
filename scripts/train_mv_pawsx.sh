@@ -12,19 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-#SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --time=0
-#SBATCH --mem=15GB
-
+#SBATCH --partition=GPU-shared  
+##SBATCH --partition=GPU-AI  
+#SBATCH --nodes=1                                                                
+##SBATCH --gres=gpu:volta16:1                                                             
+#SBATCH --gres=gpu:1                                                             
+#SBATCH --time=48:00:00
 
 REPO=$PWD
+FILE=/ocean/projects/dbs200003p/xinyiw1/
 MODEL=${1:-bert-base-multilingual-cased}
 GPU=${2:-0}
-DATA_DIR=${3:-"$REPO/download/"}
-OUT_DIR=${4:-"$REPO/outputs/"}
-
+DATA_DIR=${3:-"$FILE/download/"}
+OUT_DIR=${4:-"$FILE/outputs/"}
 #export CUDA_VISIBLE_DEVICES=$GPU
 
 TASK='pawsx'
@@ -32,12 +32,18 @@ LR=2e-5
 EPOCH=5
 MAXL=128
 LANGS="de,en,es,fr,ja,ko,zh"
-BPE_DROP=0.2
-KL=0.2 
+BPE_DROP=0
+SBPED=0.5
+SBPE_END=0
+DWEIGHT=1
+
+WS=0
+KL=1
 KL_T=1
-KL_TB=0
-KL_TG=0
-KL_SG=0
+INTERP=0
+
+INTERP_TAU=0
+VTAU=0
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -57,9 +63,11 @@ else
   GRAD_ACC=4
 fi
 
-for SEED in 1 2 3 4 5;
+for SEED in 1;
 do
-SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_kltb${KL_TB}_kltg${KL_TG}_klsg${KL_SG}_s${SEED}/"
+#SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_sbped${SBPED}_intau${INTERP_TAU}_vtau${VTAU}_kl${KL}_klt${KL_T}_s${SEED}/"
+#SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_sbped${SBPED}_int${INTERP}_ws${WS}_kl${KL}_klt${KL_T}_s${SEED}/"
+SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_mbped${BPE_DROP}_kl${KL}_dw${DWEIGHT}_s${SEED}/"
 mkdir -p $SAVE_DIR
 
 python $PWD/third_party/run_mv_classify.py \
@@ -70,6 +78,7 @@ python $PWD/third_party/run_mv_classify.py \
   --do_train \
   --do_eval \
   --do_predict \
+  --data_weight $DWEIGHT \
   --train_split train \
   --test_split test \
   --data_dir $DATA_DIR/$TASK/ \
@@ -87,10 +96,14 @@ python $PWD/third_party/run_mv_classify.py \
   --save_only_best_checkpoint $LC \
   --seed $SEED \
   --bpe_dropout $BPE_DROP \
+  --sample_bpe_dropout $SBPED \
+  --sample_bpe_dropout_end $SBPE_END \
   --kl_weight $KL \
   --kl_t $KL_T \
-  --kl_t_scale_both $KL_TB \
-  --kl_t_scale_grad $KL_TG \
-  --kl_stop_grad $KL_SG \
+  --interpolate $INTERP \
+  --word_scramble $WS \
+  --interpolate_tau $INTERP_TAU \
+  --vocab_dist_tau $VTAU \
+  --vocab_dist_filename /ocean/projects/dbs200003p/xinyiw1/outputs/bert_panx_en.json \
   --eval_test_set 
 done

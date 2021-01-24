@@ -164,7 +164,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
 
   if args.vocab_dist_filename is not None and args.interpolate_tau > 0:
     # load vocab dist sampling for perturbation
-    print("loading {}...".format(args.vocab_dist_filename))
+    loggng.info("loading {}...".format(args.vocab_dist_filename))
     vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
     vocabs = vocab_dist_data['vocab']
     constraint_vocabs_size = len(vocabs)
@@ -223,20 +223,11 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
     if args.interpolate:
       assert args.sample_bpe_dropout > 0
     if args.sample_bpe_dropout > 0:
-      if cur_epoch == (args.num_train_epochs//2+1)  and args.sample_bpe_dropout_end > 0:
-        print("switching to bpe dropout: ", args.sample_bpe_dropout_end)
-        args.sample_bpe_dropout = args.sample_bpe_dropout_end
-
-      dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout)
-      if args.interpolate:
-        mix_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout)
-        concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset, mix_train_dataset)
-      else:
-        concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+      dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout, word_scramble=args.word_scramble)
+      concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
       train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
       train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-
 
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, concat_batch in enumerate(epoch_iterator):
@@ -263,40 +254,10 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
       loss = outputs[0]
       logits = outputs[-1]
 
-      if args.interpolate or args.interpolate_tau:
-        if args.interpolate:
-          dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-          dropped_inputs = {"attention_mask": dropped_batch[1],
-                "labels": dropped_batch[3]}
-          mix_inputs = mix_batch[0].to(args.device)
-          drop_len = dropped_batch[0].size(1)
-          mix_len = mix_inputs.size(1)
-          if mix_len > drop_len:
-            mix_inputs = mix_batch[0][:,:drop_len]
-          elif mix_len < drop_len:
-            mix_inputs = torch.cat([mix_batch[0], dropped_batch[0][:,mix_len-drop_len:]], dim=1)
-        else:
-          mix_inputs = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.interpolate_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs)
-          mix_inputs = mix_inputs.to(args.device)
-          dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-          dropped_inputs = {"attention_mask": dropped_batch[1],
-                "labels": dropped_batch[3]}
-         
-        if isinstance(model, torch.nn.DataParallel):                               
-            emb = model.module.bert.embeddings.word_embeddings                     
-        else:                                                                      
-            emb = model.bert.embeddings.word_embeddings                            
-        mix_embeds = emb(mix_inputs)                                       
-        drop_embeds = emb(dropped_batch[0])                                        
-        mix_p = random.uniform(0, 1)                                                      
-        dropped_inputs["inputs_embeds"] = mix_embeds*mix_p + drop_embeds*(1-mix_p)        
-        dropped_inputs["input_ids"] = None  
-      else:
-        dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-        dropped_inputs = {"input_ids": dropped_batch[0],
-              "attention_mask": dropped_batch[1],
-              "labels": dropped_batch[3]}
-        #      "reduction": "none"}
+      dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+      dropped_inputs = {"input_ids": dropped_batch[0],
+            "attention_mask": dropped_batch[1],
+            "labels": dropped_batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -305,9 +266,21 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
       if args.model_type == "xlm":
         dropped_inputs["langs"] = dropped_batch[4]
 
+      if args.data_weight > 0:
+        dropped_inputs["reduction"] = None
+
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_logits = dropped_outputs[-1]
+
+      if args.data_weight > 0:
+        if args.data_weigth == 1:
+          len_ratio = dropped_inputs["attention_mask"].sum(dim=-1) / inputs["attention_mask"].sum(dim=-1)
+        elif args.data_weigth == 2:
+          len_ratio = inputs["attention_mask"].sum(dim=-1) / dropped_inputs["attention_mask"].sum(dim=-1)
+
+        len_ratio = len_ratio / torch.sum(len_ratio)
+        dropped_loss = dropped_loss * len_ratio
 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits/args.kl_t, dim=1)
@@ -824,9 +797,12 @@ def main():
   parser.add_argument("--kl_t", default=1, type=float)
 
   parser.add_argument("--interpolate", default=0, type=float)
+  parser.add_argument("--word_scramble", default=0, type=float)
   parser.add_argument("--interpolate_tau", default=0, type=float)
   parser.add_argument("--vocab_dist_filename", default=None, type=str)
   parser.add_argument("--vocab_dist_tau", default=1, type=float)
+
+  parser.add_argument("--data_weight", default=0, type=int)
   args = parser.parse_args()
 
   if (
