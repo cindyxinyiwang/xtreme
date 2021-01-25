@@ -267,20 +267,19 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
         dropped_inputs["langs"] = dropped_batch[4]
 
       if args.data_weight > 0:
-        dropped_inputs["reduction"] = None
+        dropped_inputs["reduction"] = "none" 
 
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_logits = dropped_outputs[-1]
 
       if args.data_weight > 0:
-        if args.data_weigth == 1:
-          len_ratio = dropped_inputs["attention_mask"].sum(dim=-1) / inputs["attention_mask"].sum(dim=-1)
-        elif args.data_weigth == 2:
-          len_ratio = inputs["attention_mask"].sum(dim=-1) / dropped_inputs["attention_mask"].sum(dim=-1)
-
+        if args.data_weight == 1:
+          len_ratio = dropped_inputs["attention_mask"].sum(dim=-1).float() / inputs["attention_mask"].sum(dim=-1)
+        elif args.data_weight == 2:
+          len_ratio = inputs["attention_mask"].sum(dim=-1).float() / dropped_inputs["attention_mask"].sum(dim=-1)
         len_ratio = len_ratio / torch.sum(len_ratio)
-        dropped_loss = dropped_loss * len_ratio
+        dropped_loss = (dropped_loss * len_ratio).sum()
 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits/args.kl_t, dim=1)
