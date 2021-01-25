@@ -254,10 +254,19 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
       loss = outputs[0]
       logits = outputs[-1]
 
-      dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-      dropped_inputs = {"input_ids": dropped_batch[0],
-            "attention_mask": dropped_batch[1],
-            "labels": dropped_batch[3]}
+      if args.drop_tau > 0:
+        # switchout
+        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs, tokenizer=tokenizer)
+        drop_input_tokens = drop_input_tokens.to(args.device)
+        dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+        dropped_inputs = {"input_ids": drop_input_tokens,
+              "attention_mask": dropped_batch[1],
+              "labels": dropped_batch[3]}
+      else:
+        dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
+        dropped_inputs = {"input_ids": dropped_batch[0],
+              "attention_mask": dropped_batch[1],
+              "labels": dropped_batch[3]}
 
       if args.model_type != "distilbert":
         # XLM and RoBERTa don"t use segment_ids
@@ -326,7 +335,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
 
           # Only evaluate on single GPU otherwise metrics may not average well
           if (args.local_rank == -1 and args.evaluate_during_training):  
-            results = evaluate(args, model, tokenizer, split=args.train_split, language=args.train_language, lang2id=lang2id)
+            results = evaluate(args, model, tokenizer, split=args.train_split, language=args.eval_langs, lang2id=lang2id)
             #for key, value in results.items():
             #  tb_writer.add_scalar("eval_{}".format(key), value, global_step)
 
@@ -344,8 +353,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
               writer.write('total={}\n'.format(total_correct / total))
 
           if args.save_only_best_checkpoint:          
-            result = evaluate(args, model, tokenizer, split='dev', language=args.train_language, lang2id=lang2id, prefix=str(global_step))
-            logger.info(" Dev accuracy {} = {}".format(args.train_language, result['acc']))
+            result = evaluate(args, model, tokenizer, split='dev', language=args.eval_langs, lang2id=lang2id, prefix=str(global_step))
+            logger.info(" Dev accuracy {} = {}".format(args.eval_langs, result['acc']))
             if result['acc'] > best_score:
               logger.info(" result['acc']={} > best_score={}".format(result['acc'], best_score))
               output_dir = os.path.join(args.output_dir, "checkpoint-best")
@@ -669,6 +678,7 @@ def main():
   parser.add_argument(
     "--train_language", default="en", type=str, help="Train language if is different of the evaluation language."
   )
+  parser.add_argument("--eval_langs", type=str, default=None, help="prediction languages")
   parser.add_argument(
     "--predict_languages", type=str, default="en", help="prediction languages separated by ','."
   )
@@ -803,6 +813,7 @@ def main():
   parser.add_argument("--vocab_dist_tau", default=1, type=float)
 
   parser.add_argument("--data_weight", default=0, type=int)
+  parser.add_argument("--drop_tau", default=0, type=float)
   args = parser.parse_args()
 
   if (
@@ -840,6 +851,9 @@ def main():
     torch.distributed.init_process_group(backend="nccl")
     args.n_gpu = 1
   args.device = device
+
+  if args.eval_langs is None:
+      args.eval_langs = args.train_language
 
   # Setup logging
   logger.warning(
