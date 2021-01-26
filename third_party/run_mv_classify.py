@@ -989,7 +989,7 @@ def main():
 
       model = model_class.from_pretrained(checkpoint)
       model.to(args.device)
-      result = evaluate(args, model, tokenizer, split='dev', language=args.train_language, lang2id=lang2id, prefix=prefix)
+      result = evaluate(args, model, tokenizer, split='dev', language=args.eval_langs, lang2id=lang2id, prefix=prefix)
       if result['acc'] > best_score:
         best_checkpoint = checkpoint
         best_score = result['acc']
