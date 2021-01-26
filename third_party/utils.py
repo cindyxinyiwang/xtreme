@@ -94,7 +94,7 @@ def mlm_switch_tokens(tokens, attention_mask, tokenizer, pretrained_model, p=0.1
     sampled_tokens = tokens * (~masked_indices).long() + sampled_words_indices * masked_indices.long()
     return sampled_tokens
 
-def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_token_id, vocab_size, vocab_dist=None, vocabs=None, tokenizer=None):
+def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_token_id, vocab_size, vocab_dist=None, vocabs=None, tokenizer=None, corrupt_vals=None, corrupt_fill_val=None):
     # first sample the number of words to corrupt
     max_len = tokens.size(1)
 
@@ -136,13 +136,22 @@ def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_
       corrupt_val = torch.gather(vocabs.expand(corrupt_words.size(0), -1).to(tokens.device), 1, sampled_words_indices)
       sampled_tokens = tokens.masked_scatter_(corrupt_pos, corrupt_val)
     else:
-      #corrupt_val = torch.LongTensor(total_words).to(tokens.device)
-      #corrupts = torch.zeros_like(tokens).long().to(tokens.device)
-      #corrupts = corrupts.masked_scatter_(corrupt_pos, corrupt_val)
-      #sampled_tokens = tokens.add(corrupts).remainder_(vocab_size).masked_fill_(pad_mask, pad_token_id)
+      if corrupt_vals is not None:
+        tokens[corrupt_pos] = corrupt_vals[corrupt_pos]
+        sampled_tokens = tokens
+      elif corrupt_fill_val is not None:
+        sampled_tokens = tokens.masked_fill_(corrupt_pos, corrupt_fill_val)
+      else:
+        corrupt_val = torch.LongTensor(total_words).to(tokens.device)
+        corrupts = torch.zeros_like(tokens).long().to(tokens.device)
+        corrupts = corrupts.masked_scatter_(corrupt_pos, corrupt_val)
+        sampled_tokens = tokens.add(corrupts).remainder_(vocab_size).masked_fill_(pad_mask, pad_token_id)
 
-      sampled_tokens = tokens.masked_fill_(corrupt_pos, tokenizer.convert_tokens_to_ids(tokenizer.mask_token))
-      #sampled_tokens = tokens.masked_fill_(corrupt_pos, unk_token_id)
+      #if corrupt_vals is not None:
+      #  tokens[corrupt_pos] = corrupt_vals[corrupt_pos]
+      #  sampled_tokens = tokens
+      #else:
+      #  sampled_tokens = tokens.masked_fill_(corrupt_pos, tokenizer.convert_tokens_to_ids(tokenizer.mask_token))
     return sampled_tokens
 
 

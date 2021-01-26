@@ -162,7 +162,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
       model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
     )
 
-  if args.vocab_dist_filename is not None and args.interpolate_tau > 0:
+  if args.vocab_dist_filename is not None:
     # load vocab dist sampling for perturbation
     loggng.info("loading {}...".format(args.vocab_dist_filename))
     vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
@@ -220,8 +220,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
   cur_epoch = 0
   for _ in train_iterator:
     cur_epoch += 1
-    if args.interpolate:
-      assert args.sample_bpe_dropout > 0
     if args.sample_bpe_dropout > 0:
       dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout, word_scramble=args.word_scramble)
       concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
@@ -237,10 +235,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
         continue
 
       model.train()
-      if args.interpolate:
-        batch, dropped_batch, mix_batch = concat_batch
-      else:
-        batch, dropped_batch = concat_batch
+      batch, dropped_batch = concat_batch
 
       batch = tuple(t.to(args.device) for t in batch)
       inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
@@ -275,20 +270,41 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
       if args.model_type == "xlm":
         dropped_inputs["langs"] = dropped_batch[4]
 
-      if args.data_weight > 0:
-        dropped_inputs["reduction"] = "none" 
+      if args.inverse_adv_words_tau > 0:
+        if isinstance(model, torch.nn.DataParallel):
+            emb = model.module.bert.embeddings.word_embeddings
+        else:
+            emb = model.bert.embeddings.word_embeddings
+        # b_size, len, emb_size
+        cur_emb = emb(dropped_inputs["input_ids"])
+        dropped_inputs["inputs_embeds"] = cur_emb
+        dropped_inputs["input_ids"] = None
 
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_logits = dropped_outputs[-1]
+      # calculate word probablity using gradient information
+      if args.inverse_adv_words_tau > 0:
+        # b_size, len, emb_size
+        emb_grad = torch.autograd.grad(dropped_loss, cur_emb, retain_graph=False, create_graph=False, allow_unused=True)[0].detach()
+        emb_grad = torch.nn.functional.normalize(emb_grad, dim=2)
+        new_embed_dot_grad = torch.einsum("bij,kj->bik", (emb_grad, emb.weight))
+        prev_embed_dot_grad = torch.einsum("bij,bij->bi", (emb_grad, cur_emb))
+        # b_size, len, v_size
+        #dot_prod = prev_embed_dot_grad.unsqueeze(-1) - new_embed_dot_grad
+        dot_prod = new_embed_dot_grad - prev_embed_dot_grad.unsqueeze(-1)
+        best_words = torch.topk(dot_prod, k=1, dim=-1)[1].squeeze(-1)
+        #print(dropped_batch[0])
+        #print(best_words)
 
-      if args.data_weight > 0:
-        if args.data_weight == 1:
-          len_ratio = dropped_inputs["attention_mask"].sum(dim=-1).float() / inputs["attention_mask"].sum(dim=-1)
-        elif args.data_weight == 2:
-          len_ratio = inputs["attention_mask"].sum(dim=-1).float() / dropped_inputs["attention_mask"].sum(dim=-1)
-        len_ratio = len_ratio / torch.sum(len_ratio)
-        dropped_loss = (dropped_loss * len_ratio).sum()
+        corrupt_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.inverse_adv_words_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), tokenizer=tokenizer, corrupt_vals=best_words)
+        dropped_inputs["inputs_embeds"] = None
+        dropped_inputs["input_ids"] = corrupt_input_tokens
+        dropped_outputs = model(**inputs)
+        dropped_loss = dropped_outputs[0]
+        dropped_logits = dropped_outputs[-1]
+        #dropped_logits = 0.5*dropped_logts + 0.5*corrupt_logits
+        #dropped_loss = 0.5*dropped_loss + 0.5*corrupt_loss
 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits/args.kl_t, dim=1)
@@ -805,14 +821,12 @@ def main():
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
 
-  parser.add_argument("--interpolate", default=0, type=float)
   parser.add_argument("--word_scramble", default=0, type=float)
-  parser.add_argument("--interpolate_tau", default=0, type=float)
   parser.add_argument("--vocab_dist_filename", default=None, type=str)
   parser.add_argument("--vocab_dist_tau", default=1, type=float)
 
-  parser.add_argument("--data_weight", default=0, type=int)
   parser.add_argument("--drop_tau", default=0, type=float)
+  parser.add_argument("--inverse_adv_words_tau", default=0, type=float)
   args = parser.parse_args()
 
   if (
