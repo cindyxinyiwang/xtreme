@@ -300,7 +300,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
         corrupt_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.inverse_adv_words_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), tokenizer=tokenizer, corrupt_vals=best_words)
         dropped_inputs["inputs_embeds"] = None
         dropped_inputs["input_ids"] = corrupt_input_tokens
-        dropped_outputs = model(**inputs)
+        dropped_outputs = model(**dropped_inputs)
         dropped_loss = dropped_outputs[0]
         dropped_logits = dropped_outputs[-1]
         #dropped_logits = 0.5*dropped_logts + 0.5*corrupt_logits
