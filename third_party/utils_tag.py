@@ -339,6 +339,7 @@ def convert_examples_to_features(examples,
                  bpe_dropout=0,
                  word_swap=0,
                  sample_bpe_dropout=0,
+                 sample_bpe_dropout_low=0,
                  word_order_scramble=0,
                  word_scramble=0,
                  word_scramble_inside=False):
@@ -360,7 +361,7 @@ def convert_examples_to_features(examples,
     label_ids = []
     for word, label in zip(example.words, example.labels):
       if sample_bpe_dropout > 0:
-        bpe_dropout = random.uniform(0, sample_bpe_dropout)
+        bpe_dropout = random.uniform(sample_bpe_dropout_low, sample_bpe_dropout)
       if isinstance(tokenizer, XLMTokenizer):
         word_tokens = tokenizer.tokenize(word, lang=lang, dropout=bpe_dropout)
       else:

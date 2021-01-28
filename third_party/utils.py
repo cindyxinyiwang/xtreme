@@ -137,8 +137,8 @@ def switch_out(tokens, mask, tau, unk_token_id, pad_token_id, cls_token_id, sep_
       sampled_tokens = tokens.masked_scatter_(corrupt_pos, corrupt_val)
     else:
       if corrupt_vals is not None:
-        tokens[corrupt_pos] = corrupt_vals[corrupt_pos]
-        sampled_tokens = tokens
+        sampled_tokens = tokens.clone()
+        sampled_tokens[corrupt_pos] = corrupt_vals[corrupt_pos]
       elif corrupt_fill_val is not None:
         sampled_tokens = tokens.masked_fill_(corrupt_pos, corrupt_fill_val)
       else:

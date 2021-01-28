@@ -172,7 +172,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   cur_epoch = 0
   for _ in train_iterator:
     if args.word_scramble > 0 or args.sample_bpe_dropout > 0 or args.word_swap > 0:
-      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble, sample_bpe_dropout=args.sample_bpe_dropout)
+      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low)
       concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
       train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
@@ -237,11 +237,43 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       if args.model_type == "xlm":
         dropped_inputs["langs"] = dropped_batch[4]
 
-      dropped_inputs["noise"] = args.noised
+      if args.inverse_adv_words_tau > 0:
+        if isinstance(model, torch.nn.DataParallel):
+            emb = model.module.bert.embeddings.word_embeddings
+        else:
+            emb = model.bert.embeddings.word_embeddings
+        # b_size, len, emb_size
+        cur_emb = emb(dropped_inputs["input_ids"])
+        dropped_inputs["inputs_embeds"] = cur_emb
+        dropped_inputs["input_ids"] = None
+
+      #dropped_inputs["noise"] = args.noised
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_kept_label_mask = dropped_outputs[-2]
       dropped_logits = dropped_outputs[-1]
+      # calculate word probablity using gradient information
+      if args.inverse_adv_words_tau > 0:
+        # b_size, len, emb_size
+        emb_grad = torch.autograd.grad(dropped_loss, cur_emb, retain_graph=True, create_graph=True, allow_unused=True)[0].detach()
+        emb_grad = torch.nn.functional.normalize(emb_grad, dim=2)
+        new_embed_dot_grad = torch.einsum("bij,kj->bik", (emb_grad, emb.weight))
+        prev_embed_dot_grad = torch.einsum("bij,bij->bi", (emb_grad, cur_emb))
+        # b_size, len, v_size
+        #dot_prod = prev_embed_dot_grad.unsqueeze(-1) - new_embed_dot_grad
+        dot_prod = new_embed_dot_grad - prev_embed_dot_grad.unsqueeze(-1)
+        best_words = torch.topk(dot_prod, k=1, dim=-1)[1].squeeze(-1)
+        #print(dropped_batch[0])
+        #print(best_words)
+
+        corrupt_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.inverse_adv_words_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), tokenizer=tokenizer, corrupt_vals=best_words)
+        dropped_inputs["inputs_embeds"] = None
+        dropped_inputs["input_ids"] = corrupt_input_tokens
+        dropped_outputs = model(**dropped_inputs)
+        corrupt_loss = dropped_outputs[0]
+        corrupt_logits = dropped_outputs[-1]
+        dropped_logits = 0.5*dropped_logits + 0.5*corrupt_logits
+        dropped_loss = 0.5*dropped_loss + 0.5*corrupt_loss
 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
@@ -490,7 +522,7 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, sample_bpe_dropout=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, sample_bpe_dropout=0, sample_bpe_dropout_low=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -517,6 +549,7 @@ def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2
                         lang=lg,
                         bpe_dropout=bpe_dropout,
                         sample_bpe_dropout=sample_bpe_dropout,
+                        sample_bpe_dropout_low=sample_bpe_dropout_low,
                         word_scramble=word_scramble,
                         word_scramble_inside=args.word_scramble_inside,
                         word_swap=args.word_swap,
@@ -647,6 +680,7 @@ def main():
 
   parser.add_argument("--bpe_dropout", default=0, type=float)
   parser.add_argument("--sample_bpe_dropout", default=0, type=float)
+  parser.add_argument("--sample_bpe_dropout_low", default=0, type=float)
   parser.add_argument("--word_swap", default=0, type=float)
   parser.add_argument("--word_scramble", default=0, type=float)
   parser.add_argument("--word_scramble_inside", default=0, type=float)
@@ -662,6 +696,8 @@ def main():
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
+
+  parser.add_argument("--inverse_adv_words_tau", default=0, type=float)
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -718,7 +754,7 @@ def main():
 
   args.model_type = args.model_type.lower()
   config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-  pretrained_config_class, pretrained_model_class, pretrained_tokenizer_class = MODEL_CLASSES["mlm_"+args.model_type]
+  #pretrained_config_class, pretrained_model_class, pretrained_tokenizer_class = MODEL_CLASSES["mlm_"+args.model_type]
   config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                       num_labels=num_labels,
                       fix_class=args.fix_class,

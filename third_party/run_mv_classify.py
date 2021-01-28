@@ -221,7 +221,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
   for _ in train_iterator:
     cur_epoch += 1
     if args.sample_bpe_dropout > 0:
-      dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout, word_scramble=args.word_scramble)
+      dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low, word_scramble=args.word_scramble)
       concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
       train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
@@ -600,7 +600,7 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
     dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
   return dataset
 
-def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0, sample_bpe_dropout=0, word_scramble=0):
+def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0, sample_bpe_dropout=0, sample_bpe_dropout_low=0, word_scramble=0):
   # Make sure only the first process in distributed training process the 
   # dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -639,6 +639,7 @@ def load_examples(args, task, tokenizer, split='train', language='en', lang2id=N
     lang2id=lang2id,
     bpe_dropout=bpe_drop,
     sample_bpe_dropout=sample_bpe_dropout,
+    sample_bpe_dropout_low=sample_bpe_dropout_low,
     word_scramble=word_scramble,
   )
 
@@ -817,6 +818,7 @@ def main():
 
   parser.add_argument("--sample_bpe_dropout", default=0, type=float)
   parser.add_argument("--sample_bpe_dropout_end", default=0, type=float)
+  parser.add_argument("--sample_bpe_dropout_low", default=0, type=float)
   parser.add_argument("--bpe_dropout", default=0, type=float)
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
