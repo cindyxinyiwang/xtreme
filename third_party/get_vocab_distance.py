@@ -128,24 +128,31 @@ def main():
   # Prepare NER/POS task
   labels = get_labels(args.labels)
   num_labels = len(labels)
+  print(args.model_name_or_path)
+  print("bert" in args.model_name_or_path)
   # Use cross entropy ignore index as padding label id
   # so that only real label ids contribute to the loss later
   pad_token_label_id = CrossEntropyLoss().ignore_index
-  train_dataset, input_id_set = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0)
-  train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.2)
-  input_id_set = input_id_set.union(input_id_set_drop)
-  train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.1)
-  input_id_set = input_id_set.union(input_id_set_drop)
-  train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.3)
-  input_id_set = input_id_set.union(input_id_set_drop)
+  train_dataset, input_id_set = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.2)
+  #train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0)
+  #input_id_set = input_id_set.union(input_id_set_drop)
+  #train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.1)
+  #input_id_set = input_id_set.union(input_id_set_drop)
+  #train_dataset, input_id_set_drop = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=0.3)
+  #input_id_set = input_id_set.union(input_id_set_drop)
   vocab_distance = {}
-  input_id_set = [ i for i in list(input_id_set) if i > 104 ]
+  #input_id_set = [ i for i in list(input_id_set) if i > 104 ]
+  input_id_set = [ i for i in list(input_id_set)]
   print(len(input_id_set))
+  print(args.output_file)
   for i in input_id_set:
     dist = []
     compare_tokens = []
-    base_token = tokenizer.ids_to_tokens[i]
-    if "bert" in args.model_name_or_path:
+    if "xlm" not in args.model_name_or_path:
+      base_token = tokenizer.ids_to_tokens[i]
+    else:
+      base_token = tokenizer._convert_id_to_token(i)
+    if "xlm" not in args.model_name_or_path:
       indicator = "##"
     else:
       indicator = "##"
@@ -154,7 +161,11 @@ def main():
       if i == j:
         dist.append(1000)
         continue
-      compare_token = remove_bpe(tokenizer.ids_to_tokens[j], indicator)
+      if "xlm" not in args.model_name_or_path:
+        compare_token = tokenizer.ids_to_tokens[j]
+      else:
+        compare_token = tokenizer._convert_id_to_token(j)
+      compare_token = remove_bpe(compare_token, indicator)
       dist.append(editdistance.eval(base_token, compare_token))
     vocab_distance[i] = dist
     if i%1000 == 0:
