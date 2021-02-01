@@ -155,7 +155,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
     for k, v in vocab_dist.items():
       # normalize the sample prob
       new_vocab_dist[int(k)] = scipy.special.softmax([-float(vi)/args.vocab_dist_tau for vi in v])
-    new_vocab_dist[tokenizer.vocab.get(tokenizer.unk_token)] = [1/constraint_vocabs_size for _ in range(constraint_vocabs_size)]
+    new_vocab_dist[tokenizer.unk_token_id] = [1/constraint_vocabs_size for _ in range(constraint_vocabs_size)]
     vocab_dist = new_vocab_dist
   else:
     vocabs, vocab_dist = None, None
@@ -184,7 +184,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       model.train()
       batch, dropped_batch = concat_batch
       if args.tau > 0:
-        input_tokens = utils.switch_out(batch[0], mask=batch[1], tau=args.tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab))
+        input_tokens = utils.switch_out(batch[0], mask=batch[1], tau=args.tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=tokenizer.vocab_size)
         input_tokens = input_tokens.to(args.device)
         batch = tuple(t.to(args.device) for t in batch if t is not None)
         inputs = {"input_ids": input_tokens,
@@ -210,7 +210,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
       if args.drop_tau > 0:
         # switchout
-        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs)
+        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=tokenizer.vocab_size, vocab_dist=vocab_dist, vocabs=vocabs)
         drop_input_tokens = drop_input_tokens.to(args.device)
         dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
         dropped_inputs = {"input_ids": drop_input_tokens,
@@ -239,9 +239,15 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
       if args.inverse_adv_words_tau > 0:
         if isinstance(model, torch.nn.DataParallel):
-            emb = model.module.bert.embeddings.word_embeddings
+            if hasattr(model, "bert"):
+              emb = model.module.bert.embeddings.word_embeddings
+            else:
+              emb = model.module.roberta.get_input_embeddings()
         else:
-            emb = model.bert.embeddings.word_embeddings
+            if hasattr(model, "bert"):
+              emb = model.bert.embeddings.word_embeddings
+            else:
+              emb = model.roberta.get_input_embeddings()
         # b_size, len, emb_size
         cur_emb = emb(dropped_inputs["input_ids"])
         dropped_inputs["inputs_embeds"] = cur_emb
@@ -266,7 +272,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
         #print(dropped_batch[0])
         #print(best_words)
 
-        corrupt_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.inverse_adv_words_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), tokenizer=tokenizer, corrupt_vals=best_words)
+        corrupt_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.inverse_adv_words_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=tokenizer.vocab_size, tokenizer=tokenizer, corrupt_vals=best_words)
         dropped_inputs["inputs_embeds"] = None
         dropped_inputs["input_ids"] = corrupt_input_tokens
         dropped_outputs = model(**dropped_inputs)
