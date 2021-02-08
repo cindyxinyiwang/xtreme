@@ -162,6 +162,20 @@ def train(args, train_dataset, model, tokenizer, lang2id=None):
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
+  if args.dic_sample_prob > 0:
+    logger.info("Creating features from dataset file at {}".format(args.dic_sample_file))
+    dic_vocab = {}
+    dic_sample_file = args.dic_sample_file.split(",")
+    for f in dic_sample_file:
+        with open(f, 'r') as myfile:
+            for line in myfile:
+                k, w = line.split()
+                if k not in dic_vocab:
+                    dic_vocab[k] = []
+                dic_vocab[k].append(w)
+  else:
+      dic_vocab = None
+
   global_step = 0
   epochs_trained = 0
   steps_trained_in_current_epoch = 0
@@ -186,12 +200,11 @@ def train(args, train_dataset, model, tokenizer, lang2id=None):
   )
   set_seed(args)  # Added here for reproductibility
   for _ in train_iterator:
-    if args.resample_dataset:
+    if args.resample_dataset or args.dic_sample_prob > 0:
       logger.info("Resample dataset for training....")
-      train_dataset = load_examples(args, tokenizer, evaluate=False, language=args.train_lang, lang2id=lang2id, bpe_drop=args.bpe_dropout)
+      train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, dic_sample_prob=args.dic_sample_prob, dic_vocab=dic_vocab)
       train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
       train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-
 
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     for step, batch in enumerate(epoch_iterator):
@@ -500,7 +513,7 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
   return dataset
 
 
-def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0):
+def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0, dic_vocab=None, dic_sample_prob=0):
   # Make sure only the first process in distributed training process the 
   # dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -511,32 +524,6 @@ def load_examples(args, task, tokenizer, split='train', language='en', lang2id=N
   # Load data features from cache or dataset file
   lc = '_lc' if args.do_lower_case else ''
   assert not evaluate
-  assert bpe_drop > 0
-  if bpe_drop > 0:
-    cached_features_file = os.path.join(
-      args.data_dir,
-      "cached_{}_{}_{}_{}_{}{}_drop{}".format(
-        split,
-        list(filter(None, args.model_name_or_path.split("/"))).pop(),
-        str(args.max_seq_length),
-        str(task),
-        str(language),
-        lc,
-        str(bpe_drop),
-      ),
-    )
-  else:
-    cached_features_file = os.path.join(
-      args.data_dir,
-      "cached_{}_{}_{}_{}_{}{}".format(
-        split,
-        list(filter(None, args.model_name_or_path.split("/"))).pop(),
-        str(args.max_seq_length),
-        str(task),
-        str(language),
-        lc,
-      ),
-    )
   logger.info("Creating features from dataset file at %s", args.data_dir)
   label_list = processor.get_labels()
   if split == 'train':
@@ -563,6 +550,8 @@ def load_examples(args, task, tokenizer, split='train', language='en', lang2id=N
     pad_token_segment_id=0,
     lang2id=lang2id,
     bpe_dropout=bpe_drop,
+    dic_vocab=dic_vocab,
+    dic_sample_prob=dic_sample_prob,
   )
 
   # Make sure only the first process in distributed training process the 
@@ -739,6 +728,10 @@ def main():
   parser.add_argument("--tau", type=float, default=-1, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--bpe_dropout", type=float, default=0, help="wait N times of decreasing dev score before early stop during training")
   parser.add_argument("--resample_dataset", default=0, type=float, help="set to 1 if resample at each epoch")
+
+  parser.add_argument("--dic_sample_prob", default=0, type=float)
+  parser.add_argument("--dic_sample_file", default=None, type=str)
+
   args = parser.parse_args()
 
   if (

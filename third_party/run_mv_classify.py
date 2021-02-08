@@ -132,6 +132,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
     },
     {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
   ]
+  meta_parameters = [p for n, p in model.classifier.named_parameters()]
   optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
   scheduler = get_linear_schedule_with_warmup(
     optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
@@ -179,6 +180,20 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
   else:
     vocabs, vocab_dist = None, None
 
+  if args.dic_sample_prob > 0:
+    logger.info("Creating features from dataset file at {}".format(args.dic_sample_file))
+    dic_vocab = {}
+    dic_sample_file = args.dic_sample_file.split(",")
+    for f in dic_sample_file:
+        with open(f, 'r') as myfile:
+            for line in myfile:
+                k, w = line.split()
+                if k not in dic_vocab:
+                    dic_vocab[k] = []
+                dic_vocab[k].append(w)
+  else:
+      dic_vocab = None
+
 
   # Train!
   logger.info("***** Running training *****")
@@ -220,8 +235,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
   cur_epoch = 0
   for _ in train_iterator:
     cur_epoch += 1
-    if args.sample_bpe_dropout > 0:
-      dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low, word_scramble=args.word_scramble)
+    if args.sample_bpe_dropout > 0 or args.dic_sample_prob > 0:
+      dropped_train_dataset = load_examples(args, args.task_name, tokenizer, split="train", language=args.train_language, bpe_drop=args.bpe_dropout, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low, word_scramble=args.word_scramble, dic_sample_prob=args.dic_sample_prob, dic_vocab=dic_vocab)
       concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
       train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
@@ -245,6 +260,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
         )  # XLM don't use segment_ids
       if args.model_type == "xlm":
         inputs["langs"] = batch[4]
+      if args.meta_tau > 0:
+        inputs["reduction"] = "none" 
       outputs = model(**inputs)
       loss = outputs[0]
       logits = outputs[-1]
@@ -270,42 +287,27 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
       if args.model_type == "xlm":
         dropped_inputs["langs"] = dropped_batch[4]
 
-      if args.inverse_adv_words_tau > 0:
-        if isinstance(model, torch.nn.DataParallel):
-            emb = model.module.bert.embeddings.word_embeddings
-        else:
-            emb = model.bert.embeddings.word_embeddings
-        # b_size, len, emb_size
-        cur_emb = emb(dropped_inputs["input_ids"])
-        dropped_inputs["inputs_embeds"] = cur_emb
-        dropped_inputs["input_ids"] = None
+      if args.meta_tau > 0:
+        dropped_inputs["reduction"] = "none"
 
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_logits = dropped_outputs[-1]
-      # calculate word probablity using gradient information
-      if args.inverse_adv_words_tau > 0:
-        # b_size, len, emb_size
-        emb_grad = torch.autograd.grad(dropped_loss, cur_emb, retain_graph=False, create_graph=False, allow_unused=True)[0].detach()
-        emb_grad = torch.nn.functional.normalize(emb_grad, dim=2)
-        new_embed_dot_grad = torch.einsum("bij,kj->bik", (emb_grad, emb.weight))
-        prev_embed_dot_grad = torch.einsum("bij,bij->bi", (emb_grad, cur_emb))
-        # b_size, len, v_size
-        #dot_prod = prev_embed_dot_grad.unsqueeze(-1) - new_embed_dot_grad
-        dot_prod = new_embed_dot_grad - prev_embed_dot_grad.unsqueeze(-1)
-        best_words = torch.topk(dot_prod, k=1, dim=-1)[1].squeeze(-1)
-        #print(dropped_batch[0])
-        #print(best_words)
 
-        corrupt_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.inverse_adv_words_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), tokenizer=tokenizer, corrupt_vals=best_words)
-        dropped_inputs["inputs_embeds"] = None
-        dropped_inputs["input_ids"] = corrupt_input_tokens
-        dropped_outputs = model(**dropped_inputs)
-        dropped_loss = dropped_outputs[0]
-        dropped_logits = dropped_outputs[-1]
-        #dropped_logits = 0.5*dropped_logts + 0.5*corrupt_logits
-        #dropped_loss = 0.5*dropped_loss + 0.5*corrupt_loss
-
+      if args.meta_tau > 0:
+        # get the gradient for each example
+        grad_sim = []
+        for i in range(loss.size(0)):
+          rg = torch.autograd.grad(loss[i], meta_parameters, retain_graph=True, allow_unused=True)[0]
+          dg = torch.autograd.grad(dropped_loss[i], meta_parameters, retain_graph=True, allow_unused=True)[0]
+          grad_sim.append( (rg*dg).sum() / (torch.norm(rg)*torch.norm(dg) + 1e-8) )
+        grad_sim = torch.FloatTensor(grad_sim).to(args.device)
+        grad_weight = torch.softmax(grad_sim / args.meta_tau, dim=-1)
+        if step % 1000 == 0:
+          print(grad_sim)
+          print(grad_weight)
+        loss = loss.mean()
+        dropped_loss = (dropped_loss * grad_weight).sum()
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits/args.kl_t, dim=1)
         dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits, dim=1)
@@ -313,8 +315,13 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, lang2id=
           prob = prob[:len(dropped_log_prob)]
         elif len(prob) < len(dropped_log_prob):
           dropped_log_prob = dropped_log_prob[:len(prob)]
-        kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
-        kl = kl_loss(dropped_log_prob, prob)
+        if args.meta_tau > 0:
+          kl_loss = torch.nn.KLDivLoss(reduction='none')
+          kl = kl_loss(dropped_log_prob, prob)
+          kl = (kl * grad_weight.unsqueeze(-1)).sum()
+        else:
+          kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+          kl = kl_loss(dropped_log_prob, prob)
         loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl
       else:
         loss = 0.5*loss + 0.5*dropped_loss
@@ -584,6 +591,10 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
   if args.local_rank == 0 and not evaluate:
     torch.distributed.barrier()  
 
+  if args.few_shot is not None:
+    features = features[:args.few_shot]
+    logging.info("Using few shot examples {}".format(args.few_shot))
+
   # Convert to Tensors and build dataset
   all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
   all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
@@ -600,7 +611,7 @@ def load_and_cache_examples(args, task, tokenizer, split='train', language='en',
     dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
   return dataset
 
-def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0, sample_bpe_dropout=0, sample_bpe_dropout_low=0, word_scramble=0):
+def load_examples(args, task, tokenizer, split='train', language='en', lang2id=None, evaluate=False, bpe_drop=0, sample_bpe_dropout=0, sample_bpe_dropout_low=0, word_scramble=0, dic_sample_prob=0, dic_vocab=None):
   # Make sure only the first process in distributed training process the 
   # dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -641,12 +652,19 @@ def load_examples(args, task, tokenizer, split='train', language='en', lang2id=N
     sample_bpe_dropout=sample_bpe_dropout,
     sample_bpe_dropout_low=sample_bpe_dropout_low,
     word_scramble=word_scramble,
+    dic_sample_prob=dic_sample_prob,
+    dic_vocab=dic_vocab
   )
 
   # Make sure only the first process in distributed training process the 
   # dataset, and the others will use the cache
   if args.local_rank == 0 and not evaluate:
     torch.distributed.barrier()  
+
+  if args.few_shot is not None:
+    features = features[:args.few_shot]
+    logging.info("Using few shot examples {}".format(args.few_shot))
+
 
   # Convert to Tensors and build dataset
   all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
@@ -828,7 +846,12 @@ def main():
   parser.add_argument("--vocab_dist_tau", default=1, type=float)
 
   parser.add_argument("--drop_tau", default=0, type=float)
-  parser.add_argument("--inverse_adv_words_tau", default=0, type=float)
+  parser.add_argument("--meta_tau", default=0, type=float)
+
+  parser.add_argument("--dic_sample_prob", default=0, type=float)
+  parser.add_argument("--dic_sample_file", default=None, type=str)
+
+  parser.add_argument("--few_shot", default=None, type=int)
   args = parser.parse_args()
 
   if (

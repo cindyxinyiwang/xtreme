@@ -48,13 +48,14 @@ class InputExample(object):
 class InputFeatures(object):
   """A single set of features of data."""
 
-  def __init__(self, input_ids, input_mask, segment_ids, label_ids, langs=None, subword_ids=None):
+  def __init__(self, input_ids, input_mask, segment_ids, label_ids, langs=None, subword_ids=None, second_input_ids=None):
     self.input_ids = input_ids
     self.input_mask = input_mask
     self.segment_ids = segment_ids
     self.label_ids = label_ids
     self.langs = langs
     self.subword_ids = subword_ids
+    self.second_input_ids = second_input_ids
 
 
 def read_examples_from_file(file_path, lang, lang2id=None):
@@ -337,12 +338,18 @@ def convert_examples_to_features(examples,
                  mask_padding_with_zero=True,
                  lang='en',
                  bpe_dropout=0,
+                 second_bpe_dropout=0,
+                 wpiece_tokenize=0,
                  word_swap=0,
                  sample_bpe_dropout=0,
                  sample_bpe_dropout_low=0,
                  word_order_scramble=0,
                  word_scramble=0,
-                 word_scramble_inside=False):
+                 word_scramble_inside=False,
+                 tagged_sample_vocab=None,
+                 tagged_sample_prob=0,
+                 dic_vocab=None,
+                 dic_sample_prob=0):
   """ Loads a data file into a list of `InputBatch`s
     `cls_token_at_end` define the location of the CLS token:
       - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -351,23 +358,52 @@ def convert_examples_to_features(examples,
   """
 
   label_map = {label: i for i, label in enumerate(label_list)}
-
+  total_replaced_words = 0
   features = []
   for (ex_index, example) in enumerate(examples):
     if ex_index % 10000 == 0:
       logger.info("Writing example %d of %d", ex_index, len(examples))
 
     tokens = []
+    second_tokens = []
     label_ids = []
     for word, label in zip(example.words, example.labels):
+      if tagged_sample_prob > 0:
+        assert tagged_sample_vocab is not None
+        if random.random() < tagged_sample_prob:
+            replaced_word = random.choice(tagged_sample_vocab[label])
+            word = replaced_word
+
+      if dic_sample_prob > 0:
+        assert dic_vocab is not None
+        if random.random() < dic_sample_prob and word.lower() in dic_vocab:
+            replaced_word = random.choice(dic_vocab[word.lower()])
+            word = replaced_word
+            total_replaced_words += 1
+
       if sample_bpe_dropout > 0:
         bpe_dropout = random.uniform(sample_bpe_dropout_low, sample_bpe_dropout)
       if isinstance(tokenizer, XLMTokenizer):
-        word_tokens = tokenizer.tokenize(word, lang=lang, dropout=bpe_dropout)
+        word_tokens = tokenizer.tokenize(word, lang=lang, dropout=bpe_dropout, wpiece_tokenize=wpiece_tokenize)
       else:
         word_tokens = tokenizer.tokenize(word, dropout=bpe_dropout)
       if len(word) != 0 and len(word_tokens) == 0:
         word_tokens = [tokenizer.unk_token]
+      if second_bpe_dropout > 0:
+        if isinstance(tokenizer, XLMTokenizer):
+          second_word_tokens = tokenizer.tokenize(word, lang=lang, dropout=second_bpe_dropout)
+        else:
+          second_word_tokens = tokenizer.tokenize(word, dropout=second_bpe_dropout)
+        if len(word) != 0 and len(second_word_tokens) == 0:
+          second_word_tokens = [tokenizer.unk_token]
+        l_token = len(word_tokens)
+        sl_token = len(second_word_tokens)
+        if l_token < sl_token:
+            word_tokens = word_tokens + [tokenizer.pad_token]*(sl_token-l_token)
+        elif l_token > sl_token:
+            second_word_tokens = second_word_tokens + [tokenizer.pad_token]*(l_token-sl_token)
+        second_tokens.extend(second_word_tokens)
+
       if word_scramble > 0 and random.uniform(0, 1) < word_scramble:
         if word_scramble_inside and len(word_tokens) > 1:
           t = word_tokens[1:-1]
@@ -394,6 +430,8 @@ def convert_examples_to_features(examples,
     if len(tokens) > max_seq_length - special_tokens_count:
       print('truncate token', len(tokens), max_seq_length, special_tokens_count)
       tokens = tokens[:(max_seq_length - special_tokens_count)]
+      if second_bpe_dropout > 0:
+       second_tokens = second_tokens[:(max_seq_length - special_tokens_count)]
       label_ids = label_ids[:(max_seq_length - special_tokens_count)]    
 
     # The convention in BERT is:
@@ -412,23 +450,33 @@ def convert_examples_to_features(examples,
     # it easier for the model to learn the concept of sequences.
 
     tokens += [sep_token]
+    if second_bpe_dropout > 0:
+      second_tokens += [sep_token]
     label_ids += [pad_token_label_id]
     if sep_token_extra:
       # roberta uses an extra separator b/w pairs of sentences
       tokens += [sep_token]
+      if second_bpe_dropout > 0:
+        second_tokens += [sep_token]
       label_ids += [pad_token_label_id]
     segment_ids = [sequence_a_segment_id] * len(tokens)
 
     if cls_token_at_end:
       tokens += [cls_token]
+      if second_bpe_dropout > 0:
+        second_tokens += [cls_token]
       label_ids += [pad_token_label_id]
       segment_ids += [cls_token_segment_id]
     else:
       tokens = [cls_token] + tokens
+      if second_bpe_dropout > 0:
+        second_tokens = [cls_token] + second_tokens
       label_ids = [pad_token_label_id] + label_ids
       segment_ids = [cls_token_segment_id] + segment_ids
 
     input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    if second_bpe_dropout > 0:
+      second_input_ids = tokenizer.convert_tokens_to_ids(second_tokens)
 
     # The mask has 1 for real tokens and 0 for padding tokens. Only real
     # tokens are attended to.
@@ -438,11 +486,15 @@ def convert_examples_to_features(examples,
     padding_length = max_seq_length - len(input_ids)
     if pad_on_left:
       input_ids = ([pad_token] * padding_length) + input_ids
+      if second_bpe_dropout > 0:
+        second_input_ids = ([pad_token] * padding_length) + second_input_ids
       input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
       segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
       label_ids = ([pad_token_label_id] * padding_length) + label_ids
     else:
       input_ids += ([pad_token] * padding_length)
+      if second_bpe_dropout > 0:
+        second_input_ids += ([pad_token] * padding_length)
       input_mask += ([0 if mask_padding_with_zero else 1] * padding_length)
       segment_ids += ([pad_token_segment_id] * padding_length)
       label_ids += ([pad_token_label_id] * padding_length)
@@ -464,18 +516,30 @@ def convert_examples_to_features(examples,
       logger.info("*** Example ***")
       logger.info("guid: %s", example.guid)
       logger.info("tokens: %s", " ".join([str(x) for x in tokens]))
+      if second_bpe_dropout > 0:
+        logger.info("second tokens: %s", " ".join([str(x) for x in second_tokens]))
       logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
       logger.info("input_mask: %s", " ".join([str(x) for x in input_mask]))
       logger.info("segment_ids: %s", " ".join([str(x) for x in segment_ids]))
       logger.info("label_ids: %s", " ".join([str(x) for x in label_ids]))
       logger.info("langs: {}".format(langs))
 
-    features.append(
-        InputFeatures(input_ids=input_ids,
-                input_mask=input_mask,
-                segment_ids=segment_ids,
-                label_ids=label_ids,
-                langs=langs))
+    if second_bpe_dropout > 0:
+      features.append(
+          InputFeatures(input_ids=input_ids,
+                  input_mask=input_mask,
+                  segment_ids=segment_ids,
+                  label_ids=label_ids,
+                  langs=langs,
+                  second_input_ids=second_input_ids))
+    else:
+      features.append(
+          InputFeatures(input_ids=input_ids,
+                  input_mask=input_mask,
+                  segment_ids=segment_ids,
+                  label_ids=label_ids,
+                  langs=langs))
+  logger.info("total replaced words %d", total_replaced_words)
   return features
 
 

@@ -28,6 +28,9 @@ import scipy
 
 import numpy as np
 import torch
+import faiss
+#import faiss.contrib.torch_utils
+
 from seqeval.metrics import precision_score, recall_score, f1_score
 from tensorboardX import SummaryWriter
 from torch.nn import CrossEntropyLoss
@@ -71,11 +74,6 @@ MODEL_CLASSES = {
   "xlmr": (XLMRobertaConfig, XLMRobertaForTokenClassification, XLMRobertaTokenizer),
 }
 
-def get_lambda(b_size, alpha):
-  dist = torch.distributions.beta.Beta(alpha, alpha)
-  l_ = dist.sample(sample_shape=[b_size])
-  l_ = torch.max(l_, 1-l_)
-  return l_
 
 def set_seed(args):
   random.seed(args.seed)
@@ -119,7 +117,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
      "weight_decay": args.weight_decay},
     {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
   ]
-  meta_parameters = [p for n, p in model.classifier.named_parameters()]
   optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
   if args.fp16:
@@ -161,36 +158,21 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
     for k, v in vocab_dist.items():
       # normalize the sample prob
       new_vocab_dist[int(k)] = scipy.special.softmax([-float(vi)/args.vocab_dist_tau for vi in v])
-    new_vocab_dist[tokenizer.unk_token_id] = [1/constraint_vocabs_size for _ in range(constraint_vocabs_size)]
+    new_vocab_dist[tokenizer.vocab.get(tokenizer.unk_token)] = [1/constraint_vocabs_size for _ in range(constraint_vocabs_size)]
     vocab_dist = new_vocab_dist
+  elif args.faiss is not None and args.drop_tau > 0:
+    if isinstance(model, torch.nn.DataParallel):
+        emb = model.module.bert.embeddings.word_embeddings
+    else:
+        emb = model.bert.embeddings.word_embeddings
+    res = faiss.StandardGpuResources()
+    index_flat = faiss.IndexFlatL2(emb.weight.size(1))
+    gpu_index_flat = faiss.index_cpu_to_gpu(res, 0, index_flat)
+    gpu_index_flat.add(emb.weight.detach().cpu().numpy())
+    print(gpu_index_flat.ntotal)
+    vocabs, vocab_dist = None, None
   else:
     vocabs, vocab_dist = None, None
-  if args.tagged_sample_prob > 0:
-    data_file = os.path.join(args.data_dir, args.train_langs, "train.{}".format(args.model_name_or_path))
-    logger.info("Creating features from dataset file at {} in language {}".format(data_file, args.train_langs))
-    examples = read_examples_from_file(data_file, args.train_langs)
-    tagged_sample_vocab = {}
-    for (ex_index, example) in enumerate(examples):
-      for word, label in zip(example.words, example.labels):
-        if label not in tagged_sample_vocab: tagged_sample_vocab[label] = set([])
-        tagged_sample_vocab[label].add(word)
-    for k, v in tagged_sample_vocab.items():
-      tagged_sample_vocab[k] = list(v)
-  else:
-    tagged_sample_vocab = None
-  if args.dic_sample_prob > 0:
-    logger.info("Creating features from dataset file at {}".format(args.dic_sample_file))
-    dic_vocab = {}
-    dic_sample_file = args.dic_sample_file.split(",")
-    for f in dic_sample_file:
-        with open(f, 'r') as myfile:
-            for line in myfile:
-                k, w = line.split()
-                if k not in dic_vocab:
-                    dic_vocab[k] = []
-                dic_vocab[k].append(w)
-  else:
-      dic_vocab = None
 
   best_score = 0.0
   best_checkpoint = None
@@ -203,10 +185,13 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   cur_epoch = 0
   for _ in train_iterator:
-    if args.word_scramble > 0 or args.sample_bpe_dropout > 0 or args.word_swap > 0 or args.tagged_sample_prob > 0:
-      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low, tagged_sample_prob=args.tagged_sample_prob, tagged_sample_vocab=tagged_sample_vocab, wpiece_tokenize=args.wpiece_tokenize, dic_vocab=dic_vocab, dic_sample_prob=args.dic_sample_prob)
-      concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
-
+    if args.word_scramble > 0 or args.sample_bpe_dropout > 0 or args.word_swap > 0 or args.mix_drop > 0:
+      if args.mix_drop > 0:
+        mix_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.mix_drop, word_scramble=args.word_scramble, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low)
+        concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset, mix_train_dataset)
+      else:
+        dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low)
+        concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
       train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
       train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
@@ -214,9 +199,12 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
     cur_epoch += 1
     for step, concat_batch in enumerate(epoch_iterator):
       model.train()
-      batch, dropped_batch = concat_batch
+      if args.mix_drop:
+        batch, dropped_batch, mix_batch = concat_batch
+      else:
+        batch, dropped_batch = concat_batch
       if args.tau > 0:
-        input_tokens = utils.switch_out(batch[0], mask=batch[1], tau=args.tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=tokenizer.vocab_size)
+        input_tokens = utils.switch_out(batch[0], mask=batch[1], tau=args.tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab))
         input_tokens = input_tokens.to(args.device)
         batch = tuple(t.to(args.device) for t in batch if t is not None)
         inputs = {"input_ids": input_tokens,
@@ -234,8 +222,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
       if args.model_type == "xlm":
         inputs["langs"] = batch[4]
-      if args.meta_tau > 0:
-        inputs["reduction"] = "none"
 
       outputs = model(**inputs)
       loss = outputs[0]
@@ -243,13 +229,30 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       logits = outputs[-1]
 
       if args.drop_tau > 0:
+        if args.faiss is not None:
+          cur_emb = emb(dropped_batch[0].to(args.device))
+          k = 10
+          D, I = gpu_index_flat.search(cur_emb.view(-1, cur_emb.size(-1)).detach().cpu().numpy(), k)
+          #print(D[:5])
+          #print(I[:5])
+          D, I = torch.FloatTensor(D[:, 1:]).to(args.device)/args.faiss_tau, torch.LongTensor(I[:, 1:]).to(args.device)
+          sampled = torch.distributions.categorical.Categorical(logits=D).sample().view(-1, 1)
+          vals = torch.gather(I, 1, sampled).view(cur_emb.size(0), -1).cpu()
+        else:
+          vals = None
         # switchout
-        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=tokenizer.vocab_size, vocab_dist=vocab_dist, vocabs=vocabs)
+        drop_input_tokens = utils.switch_out(dropped_batch[0], mask=dropped_batch[1], tau=args.drop_tau, unk_token_id=tokenizer.unk_token_id, pad_token_id=tokenizer.pad_token_id, cls_token_id=tokenizer.cls_token_id, sep_token_id=tokenizer.sep_token_id, vocab_size=len(tokenizer.vocab), vocab_dist=vocab_dist, vocabs=vocabs, corrupt_vals=vals)
         drop_input_tokens = drop_input_tokens.to(args.device)
         dropped_batch = tuple(t.to(args.device) for t in dropped_batch if t is not None)
-        dropped_inputs = {"input_ids": drop_input_tokens,
-              "attention_mask": dropped_batch[1],
-              "labels": dropped_batch[3]}
+        if args.drop_emb_combine:
+          input_embed = (emb(dropped_batch[0]) + emb(drop_input_tokens))/2
+          dropped_inputs = {"inputs_embeds": input_embed,
+                "attention_mask": dropped_batch[1],
+                "labels": dropped_batch[3]}
+        else:
+          dropped_inputs = {"input_ids": drop_input_tokens,
+                "attention_mask": dropped_batch[1],
+                "labels": dropped_batch[3]}
       elif args.drop_mlm_p > 0:
         assert pretrained_model is not None
         # mlm based corruption
@@ -270,36 +273,36 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
       if args.model_type == "xlm":
         dropped_inputs["langs"] = dropped_batch[4]
+      if args.mix_drop > 0:
+        mix_inputs = {"input_ids": mix_batch[0],
+              "attention_mask": mix_batch[1],
+              "labels": mix_batch[3]}
+        mix_inputs["return_seq_out"] = True
+        mix_seq_out = model(**mix_inputs)
+        dropped_inputs["mix_seq_out"] = mix_seq_out
+        dropped_outputs = model(**dropped_inputs)
+      #else:
+      #  dropped_outputs = model(**dropped_inputs)
+      if args.alpha > 0:
+        def get_lambda(b_size, alpha):
+          dist = torch.distributions.beta.Beta(args.alpha, args.alpha)
+          l_ = dist.sample(sample_shape=[b_size]).to(args.device)
+          l_ = torch.max(l_, 1-l_)
+          return l_
+        if isinstance(model, torch.nn.DataParallel):
+            emb = model.module.bert.embeddings.word_embeddings
+        else:
+            emb = model.bert.embeddings.word_embeddings
+        beta = get_lambda(dropped_batch[0].size(0), args.alpha).view(-1, 1, 1)
+        mix_emb = beta*emb(dropped_batch[0]) + (1-beta)*emb(batch[0])
+        dropped_inputs["inputs_embeds"] = mix_emb
+        dropped_inputs["input_ids"] = None
 
-      if args.meta_tau > 0:
-        dropped_inputs["reduction"] = "none"
-      #dropped_inputs["noise"] = args.noised
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_kept_label_mask = dropped_outputs[-2]
       dropped_logits = dropped_outputs[-1]
 
-      if args.meta_tau > 0:
-        # get the gradient for each example
-        loss = loss[kept_label_mask]
-        dropped_loss = dropped_loss[dropped_kept_label_mask]
-        grad_sim = []
-        if len(loss) > len(dropped_loss):
-          loss = loss[:len(dropped_loss)]
-        elif len(loss) < len(dropped_loss):
-          dropped_loss = dropped_loss[:len(loss)]
-
-        for i in range(loss.size(0)):
-          rg = torch.autograd.grad(loss[i], meta_parameters, retain_graph=True, allow_unused=True)[0]
-          dg = torch.autograd.grad(dropped_loss[i], meta_parameters, retain_graph=True, allow_unused=True)[0]
-          grad_sim.append( (rg*dg).sum() / (torch.norm(rg)*torch.norm(dg) + 1e-8) )
-        grad_sim = torch.FloatTensor(grad_sim).to(args.device)
-        grad_weight = torch.softmax(grad_sim / args.meta_tau, dim=-1)
-        if step % 1000 == 0:
-          logging.info(grad_sim)
-          logging.info(grad_weight)
-        loss = loss.mean()
-        dropped_loss = (dropped_loss * grad_weight).sum()
 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
@@ -308,13 +311,8 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           prob = prob[:len(dropped_log_prob)]
         elif len(prob) < len(dropped_log_prob):
           dropped_log_prob = dropped_log_prob[:len(prob)]
-        if args.meta_tau > 0:
-          kl_loss = torch.nn.KLDivLoss(reduction='none')
-          kl = kl_loss(dropped_log_prob, prob)
-          kl = (kl * grad_weight.unsqueeze(-1)).sum()
-        else:
-          kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
-          kl = kl_loss(dropped_log_prob, prob)
+        kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+        kl = kl_loss(dropped_log_prob, prob)
         loss = 0.5*loss + 0.5*dropped_loss + args.kl_weight*kl
       else:
         loss = 0.5*loss + 0.5*dropped_loss
@@ -486,18 +484,14 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
   return results, preds_list
 
 
-def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_drop=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None, second_bpe_drop=0):
+def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_drop=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  if second_bpe_drop > 0:
-    cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}_drop{}_sdrop{}".format(mode, lang,
-      list(filter(None, args.model_name_or_path.split("/"))).pop(),
-      str(args.max_seq_length), bpe_drop, second_bpe_drop))
-  elif bpe_drop > 0:
+  if bpe_drop > 0:
     cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}_drop{}".format(mode, lang,
       list(filter(None, args.model_name_or_path.split("/"))).pop(),
       str(args.max_seq_length), bpe_drop))
@@ -528,7 +522,6 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
                           pad_token_label_id=pad_token_label_id,
                           lang=lg,
                           bpe_dropout=bpe_drop,
-                          second_bpe_dropout=second_bpe_drop,
                           )
       features.extend(features_lg)
     if args.local_rank in [-1, 0]:
@@ -547,26 +540,18 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
 
   # Convert to Tensors and build dataset
   all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-  if second_bpe_drop > 0:
-    second_input_ids = torch.tensor([f.second_input_ids for f in features], dtype=torch.long)
   all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
   all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
   all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
   if args.model_type == 'xlm' and features[0].langs is not None:
     all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
     logger.info('all_langs[0] = {}'.format(all_langs[0]))
-    if second_bpe_drop > 0:
-      dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs, second_input_ids)
-    else:
-      dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
   else:
-    if second_bpe_drop > 0:
-      dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, second_input_ids)
-    else:
-      dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, sample_bpe_dropout=0, sample_bpe_dropout_low=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None, tagged_sample_prob=0, tagged_sample_vocab=None, wpiece_tokenize=0, dic_vocab=None, dic_sample_prob=0):
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, sample_bpe_dropout=0, sample_bpe_dropout_low=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
@@ -597,11 +582,6 @@ def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2
                         word_scramble=word_scramble,
                         word_scramble_inside=args.word_scramble_inside,
                         word_swap=args.word_swap,
-                        tagged_sample_prob=tagged_sample_prob,
-                        tagged_sample_vocab=tagged_sample_vocab,
-                        wpiece_tokenize=wpiece_tokenize,
-                        dic_vocab=dic_vocab,
-                        dic_sample_prob=dic_sample_prob,
                         )
     features.extend(features_lg)
 
@@ -728,8 +708,6 @@ def main():
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
 
   parser.add_argument("--bpe_dropout", default=0, type=float)
-  parser.add_argument("--second_bpe_dropout", default=0, type=float)
-  parser.add_argument("--alpha", default=0, type=float)
   parser.add_argument("--sample_bpe_dropout", default=0, type=float)
   parser.add_argument("--sample_bpe_dropout_low", default=0, type=float)
   parser.add_argument("--word_swap", default=0, type=float)
@@ -749,13 +727,12 @@ def main():
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
 
   parser.add_argument("--inverse_adv_words_tau", default=0, type=float)
-  parser.add_argument("--tagged_sample_prob", default=0, type=float)
-  parser.add_argument("--wpiece_tokenize", default=0, type=float)
+  parser.add_argument("--faiss", default=None, type=str)
+  parser.add_argument("--faiss_tau", default=1, type=float)
+  parser.add_argument("--drop_emb_combine", default=0, type=int)
 
-  parser.add_argument("--dic_sample_prob", default=0, type=float)
-  parser.add_argument("--dic_sample_file", default=None, type=str)
-
-  parser.add_argument("--meta_tau", default=0, type=float)
+  parser.add_argument("--mix_drop", default=0, type=int)
+  parser.add_argument("--alpha", default=0, type=float)
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -857,7 +834,7 @@ def main():
   # Training
   if args.do_train:
     train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, few_shot=args.few_shot)
-    dropped_train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout,  second_bpe_drop=args.second_bpe_dropout, few_shot=args.few_shot)
+    dropped_train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot)
     global_step, tr_loss = train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, pad_token_label_id, lang2id, pretrained_model=pretrained_model)
     logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
