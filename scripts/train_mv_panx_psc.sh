@@ -19,8 +19,8 @@
 #SBATCH --time=48:00:00
 
 REPO=$PWD
-#MODEL=${1:-bert-base-multilingual-cased}
-MODEL=${1:-xlm-roberta-large}
+MODEL=${1:-bert-base-multilingual-cased}
+#MODEL=${1:-xlm-roberta-large}
 GPU=${2:-0}
 FILE=/ocean/projects/dbs200003p/xinyiw1/
 DATA_DIR=${3:-"$FILE/download/"}
@@ -33,11 +33,12 @@ TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
-BPE_DROP=0
-SBPED=0.3
-SBPEDL=0.2
-KL=0.6
+BPE_DROP=0.2
+KL=0.2
+DSP=0.5
 
+SBPED=0
+SBPEDL=0
 IADV=0
 DTAU=0
 
@@ -61,10 +62,10 @@ fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-for SEED in 5;
+for SEED in 3;
 do
-#OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_kl${KL}_s${SEED}/"
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_sbped${SBPED}_sl${SBPEDL}_kl${KL}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_dsp${DSP}_kl${KL}_s${SEED}/"
+#OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_sbped${SBPED}_sl${SBPEDL}_kl${KL}_s${SEED}/"
 
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_mv_tag.py \
@@ -96,6 +97,8 @@ python $REPO/third_party/run_mv_tag.py \
   --kl_weight $KL \
   --drop_tau $DTAU \
   --inverse_adv_words_tau $IADV \
+  --dic_sample_prob $DSP \
+  --dic_sample_file dict/en-es.txt,dict/en-de.txt,dict/en-fr.txt  \
   --save_only_best_checkpoint $LC
   #--eval_langs $LANGS \
 done
