@@ -140,8 +140,29 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, lan
   train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
   set_seed(args) # Add here for reproductibility (even between python 2 and 3)
 
+  if args.dic_sample_prob > 0:
+    logger.info("Creating features from dataset file at {}".format(args.dic_sample_file))
+    dic_vocab = {}
+    dic_sample_file = args.dic_sample_file.split(",")
+    for f in dic_sample_file:
+        with open(f, 'r') as myfile:
+            for line in myfile:
+                k, w = line.split()
+                if k not in dic_vocab:
+                    dic_vocab[k] = []
+                dic_vocab[k].append(w)
+  else:
+      dic_vocab = None
+
   cur_epoch = 0
   for _ in train_iterator:
+    if args.dic_sample_prob > 0:
+      train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, dic_vocab=dic_vocab, dic_sample_prob=args.dic_sample_prob)
+
+      train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+      train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
+
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
     for step, batch in enumerate(epoch_iterator):
@@ -405,16 +426,13 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_dropout=0, word_scramble=0, sample_bpe_dropout=0, sample_bpe_dropout_low=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None, tagged_sample_prob=0, tagged_sample_vocab=None, wpiece_tokenize=0, dic_vocab=None, dic_sample_prob=0):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  bpe_dropout = args.bpe_dropout
-  if mode != 'train': bpe_dropout = 0
-  assert bpe_dropout > 0
   langs = lang.split(',')
   logger.info("all languages = {}".format(lang))
   features = []
@@ -434,6 +452,16 @@ def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2
                         pad_token_label_id=pad_token_label_id,
                         lang=lg,
                         bpe_dropout=bpe_dropout,
+                        sample_bpe_dropout=sample_bpe_dropout,
+                        sample_bpe_dropout_low=sample_bpe_dropout_low,
+                        word_scramble=word_scramble,
+                        word_scramble_inside=args.word_scramble_inside,
+                        word_swap=args.word_swap,
+                        tagged_sample_prob=tagged_sample_prob,
+                        tagged_sample_vocab=tagged_sample_vocab,
+                        wpiece_tokenize=wpiece_tokenize,
+                        dic_vocab=dic_vocab,
+                        dic_sample_prob=dic_sample_prob,
                         )
     features.extend(features_lg)
 
@@ -565,6 +593,10 @@ def main():
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
+
+  parser.add_argument("--dic_sample_prob", default=0, type=float)
+  parser.add_argument("--dic_sample_file", default=None, type=str)
+
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(

@@ -203,7 +203,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   cur_epoch = 0
   for _ in train_iterator:
-    if args.word_scramble > 0 or args.sample_bpe_dropout > 0 or args.word_swap > 0 or args.tagged_sample_prob > 0:
+    if args.word_scramble > 0 or args.sample_bpe_dropout > 0 or args.word_swap > 0 or args.tagged_sample_prob > 0 or args.dic_sample_prob > 0:
       dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, bpe_dropout=args.bpe_dropout, word_scramble=args.word_scramble, sample_bpe_dropout=args.sample_bpe_dropout, sample_bpe_dropout_low=args.sample_bpe_dropout_low, tagged_sample_prob=args.tagged_sample_prob, tagged_sample_vocab=tagged_sample_vocab, wpiece_tokenize=args.wpiece_tokenize, dic_vocab=dic_vocab, dic_sample_prob=args.dic_sample_prob)
       concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
 
