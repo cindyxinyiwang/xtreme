@@ -455,8 +455,6 @@ def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2
                         sample_bpe_dropout=sample_bpe_dropout,
                         sample_bpe_dropout_low=sample_bpe_dropout_low,
                         word_scramble=word_scramble,
-                        word_scramble_inside=args.word_scramble_inside,
-                        word_swap=args.word_swap,
                         tagged_sample_prob=tagged_sample_prob,
                         tagged_sample_vocab=tagged_sample_vocab,
                         wpiece_tokenize=wpiece_tokenize,
