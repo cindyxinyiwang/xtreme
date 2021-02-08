@@ -13,39 +13,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #SBATCH --partition=GPU-shared  
+##SBATCH --partition=GPU-AI  
 #SBATCH --nodes=1                                                                
+##SBATCH --gres=gpu:volta16:1                                                             
 #SBATCH --gres=gpu:1                                                             
 #SBATCH --time=48:00:00
 
 REPO=$PWD
-#MODEL=${1:-bert-base-multilingual-cased}
-MODEL=${1:-xlm-roberta-base}
-GPU=${2:-0}
 FILE=/ocean/projects/dbs200003p/xinyiw1/
+MODEL=${1:-bert-base-multilingual-cased}
+GPU=${2:-0}
 DATA_DIR=${3:-"$FILE/download/"}
 OUT_DIR=${4:-"$FILE/outputs/"}
+#export CUDA_VISIBLE_DEVICES=$GPU
 
-TASK='udpos'
-#LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
-#TRAIN_LANGS="en"
-#TRAIN_LANGS="is"
-#LANGS="is,fo"
-#TRAIN_LANGS="fi"
-#LANGS="fi,olo"
-
-TRAIN_LANGS="hi"
-LANGS="hi,bho,ur"
-
-#TRAIN_LANGS="pt"
-#LANGS="gl,pt"
-
-
-NUM_EPOCHS=10
-MAX_LENGTH=128
+TASK='pawsx'
 LR=2e-5
-BPE_DROP=0.2
-KL=0.2 
+EPOCH=5
+MAXL=128
+LANGS="de,en,es,fr,ja,ko,zh"
+BPE_DROP=0.3
+SBPED=0
+KL=1
 KL_T=1
+ 
+ALR=1e-3
+ASTEP=1
+ANORM=1e-5
+AMAG=1e-5
+AT="d_loss"
+
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -65,51 +62,44 @@ else
   GRAD_ACC=4
 fi
 
-ALR=1e-3
-ASTEP=1
-ANORM=1e-5
-AMAG=1e-5
-
-TAU=0
-DTAU=0
-VTAU=1
-
-DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 2 3;
+for SEED in 1 2 3 4 5;
 do
-OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_vtau${VTAU}_dtau${DTAU}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
-mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_mv_tag_adv.py \
-  --data_dir $DATA_DIR \
+#SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_sbped${SBPED}_kl${KL}_klt${KL_T}_s${SEED}/"
+SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_mbped${BPE_DROP}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_at${AT}_kl${KL}_klt${KL_T}_s${SEED}/"
+mkdir -p $SAVE_DIR
+
+python $PWD/third_party/run_mv_classify_adv.py \
   --model_type $MODEL_TYPE \
-  --labels $DATA_DIR/labels.txt \
   --model_name_or_path $MODEL \
-  --output_dir $OUTPUT_DIR \
-  --max_seq_length  $MAX_LENGTH \
-  --num_train_epochs $NUM_EPOCHS \
-  --gradient_accumulation_steps $GRAD_ACC \
-  --per_gpu_train_batch_size $BATCH_SIZE \
-  --save_steps 500 \
-  --seed $SEED \
-  --learning_rate $LR \
+  --train_language en \
+  --task_name $TASK \
   --do_train \
   --do_eval \
   --do_predict \
-  --predict_langs $LANGS \
-  --log_file $OUTPUT_DIR/train.log \
+  --train_split train \
+  --test_split test \
+  --data_dir $DATA_DIR/$TASK/ \
+  --gradient_accumulation_steps $GRAD_ACC \
+  --save_steps 200 \
+  --per_gpu_train_batch_size $BATCH_SIZE \
+  --learning_rate $LR \
+  --num_train_epochs $EPOCH \
+  --max_seq_length $MAXL \
+  --output_dir $SAVE_DIR \
   --eval_all_checkpoints \
   --overwrite_output_dir \
-  --train_langs $TRAIN_LANGS \
+  --log_file 'train.log' \
+  --predict_languages $LANGS \
+  --save_only_best_checkpoint $LC \
+  --seed $SEED \
   --bpe_dropout $BPE_DROP \
+  --sample_bpe_dropout $SBPED \
   --kl_weight $KL \
   --kl_t $KL_T \
   --adv-lr $ALR \
   --adv-steps $ASTEP \
   --adv-max-norm $ANORM \
   --adv-init-mag $AMAG \
-  --tau $TAU \
-  --drop_tau $DTAU \
-  --vocab_dist_filename /pylon5/dbs200003p/xinyiw1/outputs/bert_${TRAIN_LANGS}.json \
-  --vocab_dist_tau $VTAU \
-  --save_only_best_checkpoint $LC
+  --adv_type $AT \
+  --eval_test_set 
 done

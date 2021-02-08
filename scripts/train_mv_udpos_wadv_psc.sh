@@ -33,12 +33,11 @@ TASK='udpos'
 #TRAIN_LANGS="fi"
 #LANGS="fi,olo"
 
-TRAIN_LANGS="hi"
-LANGS="hi,bho,ur"
+#TRAIN_LANGS="hi"
+#LANGS="hi,bho,ur"
 
-#TRAIN_LANGS="pt"
-#LANGS="gl,pt"
-
+TRAIN_LANGS="pt"
+LANGS="gl,pt"
 
 NUM_EPOCHS=10
 MAX_LENGTH=128
@@ -77,9 +76,9 @@ VTAU=1
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
 for SEED in 2 3;
 do
-OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_vtau${VTAU}_dtau${DTAU}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_vtau${VTAU}_dtau${DTAU}_wadv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_mv_tag_adv.py \
+python $REPO/third_party/run_mv_tag_wadv.py \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \

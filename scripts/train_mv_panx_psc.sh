@@ -12,17 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#SBATCH --partition=GPU-AI  
+
+#SBATCH --partition=GPU-shared  
 #SBATCH --nodes=1                                                                
-#SBATCH --gres=gpu:volta16:1                                                             
+#SBATCH --gres=gpu:1                                                             
 #SBATCH --time=48:00:00
 
 REPO=$PWD
-GPU=${1:-0}
-#MODEL=${2:-bert-base-multilingual-cased}
-MODEL=${2:-xlm-roberta-large}
-DATA_DIR=${3:-"$SCRATCH/download/"}
-OUT_DIR=${4:-"$SCRATCH/outputs/"}
+#MODEL=${1:-bert-base-multilingual-cased}
+MODEL=${1:-xlm-roberta-large}
+GPU=${2:-0}
+FILE=/ocean/projects/dbs200003p/xinyiw1/
+DATA_DIR=${3:-"$FILE/download/"}
+OUT_DIR=${4:-"$FILE/outputs/"}
 
 #export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
@@ -30,13 +32,14 @@ LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,e
 TRAIN_LANGS="en"
 NUM_EPOCHS=10
 MAX_LENGTH=128
-OPTIM='Adam'
 LR=2e-5
-BPE_DROP=0.2
-RWEIGHT=0.5
-DWEIGHT=0.5 
-RESAMPLE=0
-KL=1
+BPE_DROP=0
+SBPED=0.3
+SBPEDL=0.2
+KL=0.6
+
+IADV=0
+DTAU=0
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -58,9 +61,10 @@ fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-for SEED in 1;
+for SEED in 5;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_mbped${BPE_DROP}_kl${KL}_rloss${RWEIGHT}_dloss${DWEIGHT}_resample${RESAMPLE}_s${SEED}/"
+#OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_kl${KL}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_sbped${SBPED}_sl${SBPEDL}_kl${KL}_s${SEED}/"
 
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_mv_tag.py \
@@ -86,11 +90,12 @@ python $REPO/third_party/run_mv_tag.py \
   --eval_all_checkpoints \
   --eval_patience -1 \
   --overwrite_output_dir \
-  --optimizer $OPTIM \
   --bpe_dropout $BPE_DROP \
+  --sample_bpe_dropout $SBPED \
+  --sample_bpe_dropout_low $SBPEDL \
   --kl_weight $KL \
-  --resample_dataset $RESAMPLE \
-  --reg_loss_weight $RWEIGHT \
-  --drop_loss_weight $DWEIGHT \
+  --drop_tau $DTAU \
+  --inverse_adv_words_tau $IADV \
   --save_only_best_checkpoint $LC
+  #--eval_langs $LANGS \
 done

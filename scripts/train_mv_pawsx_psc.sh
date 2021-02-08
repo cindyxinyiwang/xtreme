@@ -13,34 +13,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#SBATCH --partition=GPU-AI  
+#SBATCH --partition=GPU-shared  
 #SBATCH --nodes=1                                                                
-#SBATCH --gres=gpu:volta16:1                                                             
+#SBATCH --gres=gpu:1                                                             
 #SBATCH --time=48:00:00
 
 
 REPO=$PWD
-MODEL=${1:-bert-base-multilingual-cased}
-#MODEL=${1:-xlm-roberta-base}
+#MODEL=${1:-bert-base-multilingual-cased}
+MODEL=${1:-xlm-roberta-base}
 GPU=${2:-0}
-DATA_DIR=${3:-"$SCRATCH/download/"}
-OUT_DIR=${4:-"$SCRATCH/outputs/"}
+FILE=/ocean/projects/dbs200003p/xinyiw1/
+DATA_DIR=${3:-"$FILE/download/"}
+OUT_DIR=${4:-"$FILE/outputs/"}
 
 #export CUDA_VISIBLE_DEVICES=$GPU
 
 TASK='pawsx'
 LR=2e-5
-EPOCH=5
+EPOCH=10
 MAXL=128
 LANGS="de,en,es,fr,ja,ko,zh"
-BPE_DROP=0.2
-KL=0.2 
+BPE_DROP=0
+SBPED=0.3
+SBPEDL=0.2
+KL=1
 KL_T=1
-KL_TB=0
-KL_TG=0
-KL_SG=0
-RWEIGHT=0
-DWEIGHT=1 
+MTAU=0
+DSP=1
+
+IADV=0
+DTAU=0
+
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -61,10 +65,14 @@ fi
 
 for SEED in 1 2 3 4 5;
 do
-SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_mbped${BPE_DROP}_kl${KL}_klt${KL_T}_kltb${KL_TB}_kltg${KL_TG}_klsg${KL_SG}_rloss${RWEIGHT}_dloss${DWEIGHT}_s${SEED}/"
+#SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_mbped${BPE_DROP}_kl${KL}_s${SEED}/"
+SAVE_DIR="${OUT_DIR}/${TASK}/${MODEL}-LR${LR}-epoch${EPOCH}-MaxLen${MAXL}_sbped${SBPED}_sl${SBPEDL}_dsp${DSP}_mtau${MTAU}_kl${KL}_s${SEED}/"
 mkdir -p $SAVE_DIR
 
 python $PWD/third_party/run_mv_classify.py \
+  --dic_sample_prob $DSP \
+  --dic_sample_file en-es.txt,en-de.txt,en-fr.txt  \
+  --meta_tau $MTAU \
   --model_type $MODEL_TYPE \
   --model_name_or_path $MODEL \
   --train_language en \
@@ -89,12 +97,11 @@ python $PWD/third_party/run_mv_classify.py \
   --save_only_best_checkpoint $LC \
   --seed $SEED \
   --bpe_dropout $BPE_DROP \
+  --sample_bpe_dropout $SBPED \
+  --sample_bpe_dropout_low $SBPEDL \
+  --drop_tau $DTAU \
   --kl_weight $KL \
   --kl_t $KL_T \
-  --kl_t_scale_both $KL_TB \
-  --kl_t_scale_grad $KL_TG \
-  --kl_stop_grad $KL_SG \
-  --reg_loss_weight $RWEIGHT \
-  --drop_loss_weight $DWEIGHT \
   --eval_test_set 
+  #--eval_langs $LANGS \
 done
