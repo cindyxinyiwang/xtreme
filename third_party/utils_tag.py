@@ -378,6 +378,8 @@ def convert_examples_to_features(examples,
         assert dic_vocab is not None
         if random.random() < dic_sample_prob and word.lower() in dic_vocab:
             replaced_word = random.choice(dic_vocab[word.lower()])
+            if word[0].isupper():
+                replaced_word = replaced_word[0].upper() + replaced_word[1:]
             word = replaced_word
             total_replaced_words += 1
 
@@ -389,42 +391,11 @@ def convert_examples_to_features(examples,
         word_tokens = tokenizer.tokenize(word, dropout=bpe_dropout)
       if len(word) != 0 and len(word_tokens) == 0:
         word_tokens = [tokenizer.unk_token]
-      if second_bpe_dropout > 0:
-        if isinstance(tokenizer, XLMTokenizer):
-          second_word_tokens = tokenizer.tokenize(word, lang=lang, dropout=second_bpe_dropout)
-        else:
-          second_word_tokens = tokenizer.tokenize(word, dropout=second_bpe_dropout)
-        if len(word) != 0 and len(second_word_tokens) == 0:
-          second_word_tokens = [tokenizer.unk_token]
-        l_token = len(word_tokens)
-        sl_token = len(second_word_tokens)
-        if l_token < sl_token:
-            word_tokens = word_tokens + [tokenizer.pad_token]*(sl_token-l_token)
-        elif l_token > sl_token:
-            second_word_tokens = second_word_tokens + [tokenizer.pad_token]*(l_token-sl_token)
-        second_tokens.extend(second_word_tokens)
 
-      if word_scramble > 0 and random.uniform(0, 1) < word_scramble:
-        if word_scramble_inside and len(word_tokens) > 1:
-          t = word_tokens[1:-1]
-          random.shuffle(t)
-          word_tokens = [word_tokens[0]] + t + [word_tokens[-1]]
-        else:
-          random.shuffle(word_tokens)
-      #tokens.extend(word_tokens)
-      tokens.append(word_tokens)
+      tokens.extend(word_tokens)
       # Use the real label id for the first token of the word, and padding ids for the remaining tokens
-      #label_ids.extend([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
-      label_ids.append([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
+      label_ids.extend([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
 
-    if word_swap > 0 and random.random() < word_swap and len(label_ids)>1:
-      idx = range(len(label_ids))
-      i1, i2 = random.sample(idx, 2)
-      tokens[i1], tokens[i2] = tokens[i2], tokens[i1]
-      label_ids[i1], label_ids[i2] = label_ids[i2], label_ids[i1]
-
-    tokens = [item for sublist in tokens for item in sublist]
-    label_ids = [item for sublist in label_ids for item in sublist]
     # Account for [CLS] and [SEP] with "- 2" and with "- 3" for RoBERTa.
     special_tokens_count = 3 if sep_token_extra else 2
     if len(tokens) > max_seq_length - special_tokens_count:
