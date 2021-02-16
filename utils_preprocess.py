@@ -118,7 +118,8 @@ def panx_preprocess(args):
           fout.write('\n')
   if not os.path.exists(args.output_dir):
     os.makedirs(args.output_dir)
-  langs = 'ar he vi id jv ms tl eu ml ta te af nl en de el bn hi mr ur fa fr it pt es bg ru ja ka ko th sw yo my zh kk tr et fi hu'.split(' ')
+  langs="sv da no is fo cs sl hr sr pl tr az kk uz".split()
+  #langs = 'ar he vi id jv ms tl eu ml ta te af nl en de el bn hi mr ur fa fr it pt es bg ru ja ka ko th sw yo my zh kk tr et fi hu'.split(' ')
   for lg in langs:
     for split in ['train', 'test', 'dev']:
       infile = os.path.join(args.data_dir, f'{lg}-{split}')

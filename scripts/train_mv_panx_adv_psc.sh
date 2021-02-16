@@ -15,7 +15,7 @@
 #SBATCH --partition=GPU-shared  
 #SBATCH --nodes=1                                                                
 #SBATCH --gres=gpu:1                                                             
-#SBATCH --time=8:00:00
+#SBATCH --time=16:00:00
 
 REPO=$PWD
 MODEL=${1:-bert-base-multilingual-cased}
@@ -25,37 +25,25 @@ FILE=/ocean/projects/dbs200003p/xinyiw1/
 DATA_DIR=${3:-"$FILE/download/"}
 OUT_DIR=${4:-"$FILE/outputs/"}
 
-TASK='udpos'
-LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
-TRAIN_LANGS="en"
+TASK='panx'
 
-#TRAIN_LANGS="is"
-#LANGS="is,fo"
+LANGS="az,kk,uz,tr"
+TRAIN_LANGS="tr"
 
-#TRAIN_LANGS="pt"
-#LANGS="gl,pt"
+#LANGS="sw,da,no,is,fo"
+#TRAIN_LANGS="no"
 
-#TRAIN_LANGS="hr"
-#LANGS="hr,sr,bg"
+#LANGS="sl,hr,sr,pl,cs"
+#TRAIN_LANGS="cs"
 
-#TRAIN_LANGS="no_nynorsk"
-#LANGS="no_nynorsk,no_nynorsklia,no_bokmaal"
-#TRAIN_LANGS="fi"
-#LANGS="fi,olo"
-
-TRAIN_LANGS="hi"
-LANGS="hi,bho,ur"
 
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
 BPE_DROP=0.2
-
-KL=0.2 
+KL=0.2
 KL_T=1
 
-# ran 000,100,111,001
-# to run: 101,011,010,110,
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -74,13 +62,19 @@ else
   GRAD_ACC=4
 fi
 
-DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 1 2 3;
-do
+ALR=1e-3
+ASTEP=2
+ANORM=1e-5
+AMAG=1e-5
+N=0
 
-OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_kl${KL}_s${SEED}/"
+DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
+for SEED in 4 5;
+do
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_adv_grads_noise${N}_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
+#OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_adv_noise${N}_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_mv_tag.py \
+python $REPO/third_party/run_mv_tag_adv.py \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -90,7 +84,7 @@ python $REPO/third_party/run_mv_tag.py \
   --num_train_epochs $NUM_EPOCHS \
   --gradient_accumulation_steps $GRAD_ACC \
   --per_gpu_train_batch_size $BATCH_SIZE \
-  --save_steps 500 \
+  --save_steps 1000 \
   --seed $SEED \
   --learning_rate $LR \
   --do_train \
@@ -104,6 +98,18 @@ python $REPO/third_party/run_mv_tag.py \
   --bpe_dropout $BPE_DROP \
   --kl_weight $KL \
   --kl_t $KL_T \
+  --adv-lr $ALR \
+  --adv-steps $ASTEP \
+  --adv-max-norm $ANORM \
+  --adv-init-mag $AMAG \
+  --kl_adv \
+  --noise $N \
+  --grad_scaled_adv \
   --save_only_best_checkpoint $LC
-  #--eval_langs $LANGS \
+
+  #--down_sample $ADP \
+  #--adapter \
+  #--word_max_norm $MN \
+  #--word_norm_type $NT \
+
 done

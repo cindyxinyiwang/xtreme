@@ -26,36 +26,27 @@ DATA_DIR=${3:-"$FILE/download/"}
 OUT_DIR=${4:-"$FILE/outputs/"}
 
 TASK='udpos'
-LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
-TRAIN_LANGS="en"
-
+#LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
+#TRAIN_LANGS="en"
 #TRAIN_LANGS="is"
 #LANGS="is,fo"
-
-#TRAIN_LANGS="pt"
-#LANGS="gl,pt"
-
-#TRAIN_LANGS="hr"
-#LANGS="hr,sr,bg"
-
-#TRAIN_LANGS="no_nynorsk"
-#LANGS="no_nynorsk,no_nynorsklia,no_bokmaal"
 #TRAIN_LANGS="fi"
 #LANGS="fi,olo"
 
 TRAIN_LANGS="hi"
 LANGS="hi,bho,ur"
 
+#TRAIN_LANGS="pt"
+#LANGS="gl,pt"
+
+
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
 BPE_DROP=0.2
-
 KL=0.2 
 KL_T=1
 
-# ran 000,100,111,001
-# to run: 101,011,010,110,
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
   MODEL_TYPE="bert"
@@ -74,13 +65,17 @@ else
   GRAD_ACC=4
 fi
 
-DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 1 2 3;
-do
+ALR=1e-3
+ASTEP=1
+ANORM=1e-3
+AMAG=1e-3
 
-OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_kl${KL}_s${SEED}/"
+DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
+for SEED in 1 2;
+do
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_wadv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_mv_tag.py \
+python $REPO/third_party/run_mv_tag_wadv.py \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -104,6 +99,9 @@ python $REPO/third_party/run_mv_tag.py \
   --bpe_dropout $BPE_DROP \
   --kl_weight $KL \
   --kl_t $KL_T \
+  --adv-lr $ALR \
+  --adv-steps $ASTEP \
+  --adv-max-norm $ANORM \
+  --adv-init-mag $AMAG \
   --save_only_best_checkpoint $LC
-  #--eval_langs $LANGS \
 done

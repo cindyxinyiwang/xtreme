@@ -109,12 +109,21 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   # Prepare optimizer and schedule (linear warmup and decay)
   no_decay = ["bias", "LayerNorm.weight"]
+  if args.adapter:
+      named_params = [(n, p) for n, p in model.named_parameters() if "adapter" in n or "classifier" in n]
+  else:
+      named_params = [p for p in model.named_parameters()]
   optimizer_grouped_parameters = [
-    {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+    {"params": [p for n, p in named_params if not any(nd in n for nd in no_decay)],
      "weight_decay": args.weight_decay},
-    {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
+    {"params": [p for n, p in named_params if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
   ]
   optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+  param_count = 0
+  for group in optimizer.param_groups:
+      for p in group["params"]:
+          param_count += p.numel()
+  logger.info("  Num params = %d", param_count)
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
   if args.fp16:
     try:
@@ -144,8 +153,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
   logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
   logger.info("  Total optimization steps = %d", t_total)
 
-  if args.vocab_dist_filename is not None:
+  if args.vocab_dist_filename is not None and args.drop_tau > 0:
     # load vocab dist sampling for perturbation
+    logger.info("  Loading vocab dist {}".format(args.vocab_dist_filename))
     vocab_dist_data = json.load(open(args.vocab_dist_filename, 'r'))
     vocabs = vocab_dist_data['vocab']
     constraint_vocabs_size = len(vocabs)
@@ -662,6 +672,13 @@ def main():
 
   parser.add_argument("--few_shot_extra_langs", type=str, default=None)
   parser.add_argument("--few_shot_extra_langs_size", type=str, default=None)
+
+
+  parser.add_argument("--word_max_norm", type=float, default=None)
+  parser.add_argument("--word_norm_type", type=float, default=2)
+
+  parser.add_argument("--adapter", action='store_true')
+  parser.add_argument("--down_sample", type=int, default=2)
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -715,10 +732,13 @@ def main():
 
   args.model_type = args.model_type.lower()
   config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-  pretrained_config_class, pretrained_model_class, pretrained_tokenizer_class = MODEL_CLASSES["mlm_"+args.model_type]
   config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                       num_labels=num_labels,
                       fix_class=args.fix_class,
+                      word_max_norm=args.word_max_norm,
+                      word_norm_type=args.word_norm_type,
+                      adapter=args.adapter,
+                      down_sample=args.down_sample,
                       cache_dir=args.cache_dir if args.cache_dir else None)
   tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                         do_lower_case=args.do_lower_case,

@@ -335,7 +335,9 @@ def convert_examples_to_features(examples,
                  sequence_a_segment_id=0,
                  mask_padding_with_zero=True,
                  lang='en',
-                 bpe_dropout=0):
+                 bpe_dropout=0,
+                 dic_vocab=None,
+                 dic_sample_prob=0):
   """ Loads a data file into a list of `InputBatch`s
     `cls_token_at_end` define the location of the CLS token:
       - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -345,6 +347,8 @@ def convert_examples_to_features(examples,
 
   label_map = {label: i for i, label in enumerate(label_list)}
 
+  total_replaced_words = 0
+  total_words = 0
   features = []
   for (ex_index, example) in enumerate(examples):
     if ex_index % 10000 == 0:
@@ -353,6 +357,16 @@ def convert_examples_to_features(examples,
     tokens = []
     label_ids = []
     for word, label in zip(example.words, example.labels):
+      total_words += 1
+      if dic_sample_prob > 0:
+        assert dic_vocab is not None
+        if random.random() < dic_sample_prob and word.lower() in dic_vocab:
+            replaced_word = random.choice(dic_vocab[word.lower()])
+            if word[0].isupper():
+                replaced_word = replaced_word[0].upper() + replaced_word[1:]
+            word = replaced_word
+            total_replaced_words += 1
+
       if isinstance(tokenizer, XLMTokenizer):
         word_tokens = tokenizer.tokenize(word, lang=lang, dropout=bpe_dropout)
       else:
@@ -450,6 +464,8 @@ def convert_examples_to_features(examples,
                 segment_ids=segment_ids,
                 label_ids=label_ids,
                 langs=langs))
+  logger.info("total replaced words %d", total_replaced_words)
+  logger.info("total words %d", total_words)
   return features
 
 

@@ -12,27 +12,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#SBATCH --partition=GPU-AI  
+#SBATCH --partition=GPU-shared  
 #SBATCH --nodes=1                                                                
-#SBATCH --gres=gpu:volta16:1                                                             
-#SBATCH --time=48:00:00
+#SBATCH --gres=gpu:1                                                             
+#SBATCH --time=8:00:00
 
 REPO=$PWD
 MODEL=${1:-bert-base-multilingual-cased}
+#MODEL=${1:-xlm-roberta-base}
 GPU=${2:-0}
-DATA_DIR=${3:-"$SCRATCH/download/"}
-OUT_DIR=${4:-"$SCRATCH/outputs/"}
+FILE=/ocean/projects/dbs200003p/xinyiw1/
+DATA_DIR=${3:-"$FILE/download/"}
+OUT_DIR=${4:-"$FILE/outputs/"}
 
 TASK='udpos'
 #LANGS='af,ar,bg,de,el,en,es,et,eu,fa,fi,fr,he,hi,hu,id,it,ja,kk,ko,mr,nl,pt,ru,ta,te,th,tl,tr,ur,vi,yo,zh'
 #TRAIN_LANGS="en"
-TRAIN_LANGS="is"
-LANGS="is,fo"
+#TRAIN_LANGS="is"
+#LANGS="is,fo"
+#TRAIN_LANGS="fi"
+#LANGS="fi,olo"
+
+TRAIN_LANGS="hi"
+LANGS="hi,bho,ur"
+
+#TRAIN_LANGS="pt"
+#LANGS="gl,pt"
+
+
 NUM_EPOCHS=10
 MAX_LENGTH=128
 LR=2e-5
-BPE_DROP=0
-KL=0.2 
+BPE_DROP=0.2
+KL=0.2
 KL_T=1
 
 LC=""
@@ -54,18 +66,14 @@ else
 fi
 
 ALR=1e-3
-ASTEP=2
-ANORM=1e-5
-AMAG=1e-5
-
-TAU=0
-DTAU=0.8
-VTAU=0.5
+ASTEP=1
+ANORM=1e-3
+AMAG=1e-3
 
 DATA_DIR=$DATA_DIR/$TASK/${TASK}_processed_maxlen${MAX_LENGTH}/
-for SEED in 1 2 3 4 5;
+for SEED in 1 2;
 do
-OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_tlangs${TRAIN_LANGS}_mbped${BPE_DROP}_vtau${VTAU}_tau${TAU}_dtau${DTAU}_adv_nokl_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_klt${KL_T}_s${SEED}/"
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}_mbped${BPE_DROP}_adv_lr${ALR}_as${ASTEP}_an${ANORM}_am${AMAG}_kl${KL}_s${SEED}/"
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_mv_tag_adv.py \
   --data_dir $DATA_DIR \
@@ -95,9 +103,5 @@ python $REPO/third_party/run_mv_tag_adv.py \
   --adv-steps $ASTEP \
   --adv-max-norm $ANORM \
   --adv-init-mag $AMAG \
-  --tau $TAU \
-  --drop_tau $DTAU \
-  --vocab_dist_filename /pylon5/dbs200003p/xinyiw1/outputs/bert.json \
-  --vocab_dist_tau $VTAU \
   --save_only_best_checkpoint $LC
 done

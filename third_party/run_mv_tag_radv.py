@@ -217,24 +217,22 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       embed_size, embed_dim =  embeds.weight.shape
 
       d_embeds_init = embeds(drop_input_tokens)
-
-      if args.adv_init_mag > 0:
-          d_input_mask = dropped_inputs['attention_mask'].to(d_embeds_init)
-          d_input_lengths = torch.sum(d_input_mask, 1)
-          if args.norm_type == "l2":
-              d_delta = torch.zeros_like(d_embeds_init).uniform_(-1,1) * d_input_mask.unsqueeze(2)
-              dims = d_input_lengths * d_embeds_init.size(-1)
-              d_mag = args.adv_init_mag/torch.sqrt(dims)
-              d_delta = (d_delta*d_mag.view(-1, 1, 1)).detach()
-          elif args.norm_type == "linf":
-              d_delta = torch.zeros_like(d_embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * d_input_mask.unsqueeze(2)
-              #d_delta = torch.zeros_like(d_embeds_init).normal_(0, 1) * args.adv_init_mag * d_input_mask.unsqueeze(2)
-
-      else:
-          d_delta = torch.zeros_like(d_embeds_init)
-
+      optimizer.record_param()
       for astep in range(args.adv_steps):
-          #inputs["inputs_embeds"] = embeds_init
+          if args.adv_init_mag > 0:
+              d_input_mask = dropped_inputs['attention_mask'].to(d_embeds_init)
+              d_input_lengths = torch.sum(d_input_mask, 1)
+              if args.norm_type == "l2":
+                  d_delta = torch.zeros_like(d_embeds_init).uniform_(-1,1) * d_input_mask.unsqueeze(2)
+                  dims = d_input_lengths * d_embeds_init.size(-1)
+                  d_mag = args.adv_init_mag/torch.sqrt(dims)
+                  d_delta = (d_delta*d_mag.view(-1, 1, 1)).detach()
+              elif args.norm_type == "linf":
+                  d_delta = torch.zeros_like(d_embeds_init).uniform_(-args.adv_init_mag, args.adv_init_mag) * d_input_mask.unsqueeze(2)
+                  #d_delta = torch.zeros_like(d_embeds_init).normal_(0, 1) * args.adv_init_mag * d_input_mask.unsqueeze(2)
+
+          else:
+              d_delta = torch.zeros_like(d_embeds_init)
 
           outputs = model(**inputs)
           loss = outputs[0]
@@ -247,8 +245,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
           
-          loss = loss / args.adv_steps 
-
           d_delta.requires_grad_()
           d_embeds_init.requires_grad_()
           dropped_inputs["inputs_embeds"] = d_delta + d_embeds_init
@@ -265,8 +261,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           if args.gradient_accumulation_steps > 1:
             d_loss = d_loss / args.gradient_accumulation_steps
           
-          d_loss = d_loss / args.adv_steps 
-
           if args.kl_weight > 0:
             prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
             dropped_log_prob = torch.nn.functional.log_softmax(d_logits[d_kept_label_mask], dim=1)
@@ -276,14 +270,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
               dropped_log_prob = dropped_log_prob[:len(prob)]
             kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
             kl = kl_loss(dropped_log_prob, prob)
-            loss = 0.5*loss + 0.5*d_loss + args.kl_weight*kl / args.adv_steps
+            loss = 0.5*loss + 0.5*d_loss + args.kl_weight*kl
           else:
             loss = 0.5*loss + 0.5*d_loss
-
-          if args.kl_adv:
-            d_delta_grad = torch.autograd.grad(kl, d_delta, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
-          if args.grad_scaled_adv:
-            embed_init_grad = torch.autograd.grad(loss, d_embeds_init, retain_graph=True, create_graph=True, allow_unused=True)[0].clone().detach()
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -291,46 +280,9 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           else:
             loss.backward()
 
-          if astep == args.adv_steps - 1:
-              break
-
-          if not args.kl_adv:
-            d_delta_grad = d_delta.grad.clone().detach()
-
-          if args.grad_scaled_adv:
-            #embed_init_grad = d_embeds_init.grad.clone().detach()
-            embed_grad_norm = torch.norm(embed_init_grad, dim=-1, p=float("inf"), keepdim=True)
-            if args.noise > 0:
-              d_delta = torch.ones_like(d_delta) * embed_grad_norm * torch.sign(d_delta_grad)
-            else:
-              d_delta = torch.zeros_like(d_delta).uniform_(0, 1) * embed_grad_norm * torch.sign(d_delta_grad)
-            if step % 100 == 0:
-              logger.info(" max emb_grad_norm {}".format(torch.max(embed_grad_norm)))
-              logger.info(" min emb_grad_norm {}".format(torch.min(embed_grad_norm)))
-          else:
-            if args.norm_type == "l2":
-                # sent level
-                #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1).view(-1, 1, 1)
-                # word level
-                d_denorm = torch.norm(d_delta_grad, dim=-1, keepdim=True)
-                d_denorm = torch.clamp(d_denorm, min=1e-8)
-                d_delta = (d_delta + args.adv_lr*d_delta_grad/d_denorm).detach()
-                if args.adv_max_norm > 0:
-                    d_delta_norm = torch.norm(d_delta.view(d_delta.size(0), -1).float(), p=2, dim=1).detach()
-                    exceed_mask = (d_delta_norm > args.adv_max_norm).to(d_embeds_init)
-                    reweights = (args.adv_max_norm / d_delta_norm * exceed_mask + (1-exceed_mask)).view(-1, 1, 1)
-                    d_delta = (d_delta*reweights).detach()
-            elif args.norm_type == "linf":
-                #d_denorm = torch.norm(d_delta_grad.view(d_delta_grad.size(0), -1), dim=1, p=float("inf")).view(-1, 1, 1)
-                d_denorm = torch.norm(d_delta_grad, dim=-1, p=float("inf"), keepdim=True)
-                d_denorm = torch.clamp(d_denorm, min=1e-8)
-                d_delta = (d_delta + args.adv_lr * d_delta_grad / d_denorm).detach()
-                if args.adv_max_norm > 0:
-                    d_delta = torch.clamp(d_delta, -args.adv_max_norm, args.adv_max_norm).detach()
-            else:
-                print("Norm type {} not known".format(args.norm_type))
-                exit()
+          optimizer.step()
           d_embeds_init = embeds(drop_input_tokens)
+      optimizer.set_grad(steps=args.adv_steps)
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:

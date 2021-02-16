@@ -170,19 +170,18 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   # init adv perturbation from an embedding matrix
   # initialize delta
-  if isinstance(model, torch.nn.DataParallel):
-      embed_size, embed_dim =  model.module.bert.embeddings.word_embeddings.weight.shape
-  else:
-      embed_size, embed_dim =  model.bert.embeddings.word_embeddings.weight.shape
+  embeds = model.get_input_embeddings()
+  embed_size, embed_dim =  embeds.weight.shape
 
   if args.adv_init_mag > 0:
       if args.norm_type == "l2":
-          embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=2)
+          emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=2)
       elif args.norm_type == "linf":
-          embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type="inf")
+          emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=args.adv_init_mag, norm_type=float("inf"))
   else:
-      embed_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=0)
+      emb_perturb = torch.nn.Embedding(embed_size, embed_dim, padding_idx=tokenizer.pad_token_id, max_norm=0)
   emb_perturb.to(args.device)
+
 
   cur_epoch = 0
   for _ in train_iterator:
@@ -220,11 +219,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
       # ============================ Code for adversarial training=============
       # initialize delta
-      if isinstance(model, torch.nn.DataParallel):
-          d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
-      else:
-          d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
-
+      d_embeds_init = embeds(drop_input_tokens)
       d_delta = emb_perturb(drop_input_tokens)
 
       for astep in range(args.adv_steps):
@@ -272,7 +267,7 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
             loss = 0.5*loss + 0.5*d_loss
 
           if args.kl_adv:
-            emb_perturb_grad = torch.autograd.grad(kl, emb_perturb, retain_graph=True, create_graph=True, allow_unused=True)[0]
+            emb_perturb_grad = torch.autograd.grad(kl, emb_perturb.weight, retain_graph=True, create_graph=True, allow_unused=True)[0]
 
           if args.fp16:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -280,21 +275,17 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
           else:
             loss.backward()
 
-          if astep == args.adv_steps - 1:
-            break
+          #if astep == args.adv_steps - 1:
+          #  break
 
           if not args.kl_adv:
             emb_perturb_grad = emb_perturb.weight.grad
 
-          emb_perturb.weight = emb_perturb.weight + args.adv_lr*emb_perturb_grad
+          with torch.no_grad():
+              emb_perturb.weight.copy_(emb_perturb.weight + args.adv_lr*emb_perturb_grad.detach())
           
-          if isinstance(model, torch.nn.DataParallel):
-              d_embeds_init = model.module.bert.embeddings.word_embeddings(drop_input_tokens)
-          else:
-              d_embeds_init = model.bert.embeddings.word_embeddings(drop_input_tokens)
-
-          if args.init_emb_adv:
-              d_delta = emb_perturb(drop_input_tokens)
+          d_embeds_init = embeds(drop_input_tokens)
+          d_delta = emb_perturb(drop_input_tokens)
 
       tr_loss += loss.item()
       if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -638,6 +629,9 @@ def main():
   parser.add_argument("--vocab_dist_tau", default=1, type=float)
 
 
+  parser.add_argument("--word_max_norm", type=float, default=None)
+  parser.add_argument("--word_norm_type", type=float, default=2)
+
   args = parser.parse_args()
 
   if os.path.exists(args.output_dir) and os.listdir(
@@ -694,6 +688,8 @@ def main():
   config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                       num_labels=num_labels,
                       fix_class=args.fix_class,
+                      word_max_norm=args.word_max_norm,
+                      word_norm_type=args.word_norm_type,
                       cache_dir=args.cache_dir if args.cache_dir else None)
   tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                         do_lower_case=args.do_lower_case,

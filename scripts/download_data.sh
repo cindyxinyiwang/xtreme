@@ -15,7 +15,8 @@
 
 REPO=$PWD
 #DIR=$REPO/download/
-DIR=$SCRATCH/download/
+#DIR=$SCRATCH/download/
+DIR=/ocean/projects/dbs200003p/xinyiw1/download
 mkdir -p $DIR
 
 # download XNLI dataset
@@ -93,8 +94,10 @@ function download_panx {
         base_dir=$DIR/panx_dataset/
         unzip -qq -j $DIR/AmazonPhotos.zip -d $base_dir
         cd $base_dir
-        langs=(ar he vi id jv ms tl eu ml ta te af nl en de el bn hi mr ur fa fr it pt es bg ru ja ka ko th sw yo my zh kk tr et fi hu)
+        #langs=(ar he vi id jv ms tl eu ml ta te af nl en de el bn hi mr ur fa fr it pt es bg ru ja ka ko th sw yo my zh kk tr et fi hu)
+        langs=(sv da no is fo cs sl hr sr pl tr az kk uz)
         for lg in ${langs[@]}; do
+	    echo $lg
             tar xzf $base_dir/${lg}.tar.gz
             for f in dev test train; do mv $base_dir/$f $base_dir/${lg}-${f}; done
         done
@@ -102,7 +105,7 @@ function download_panx {
         python $REPO/utils_preprocess.py \
             --data_dir $base_dir \
             --output_dir $DIR/panx \
-            --task panx
+            --task panx 
         rm -rf $base_dir
         echo "Successfully downloaded data at $DIR/panx" >> $DIR/download.log
     else
@@ -196,5 +199,5 @@ function download_tydiqa {
 #download_xquad
 #download_mlqa
 #download_tydiqa
-download_udpos
-#download_panx
+#download_udpos
+download_panx

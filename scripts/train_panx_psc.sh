@@ -12,33 +12,38 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-#SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --time=0
-#SBATCH --mem=15GB
+#SBATCH --partition=GPU-shared  
+#SBATCH --nodes=1                                                                
+#SBATCH --gres=gpu:1                                                             
+#SBATCH --time=8:00:00
 
 REPO=$PWD
 GPU=${1:-0}
-#MODEL=${2:-bert-base-multilingual-cased}
-MODEL=${2:-xlm-roberta-base}
-DATA_DIR=${3:-"$REPO/download/"}
-OUT_DIR=${4:-"$REPO/outputs/"}
+MODEL=${2:-bert-base-multilingual-cased}
+#MODEL=${2:-xlm-roberta-large}
+FILE=/ocean/projects/dbs200003p/xinyiw1/
+DATA_DIR=${3:-"$FILE/download/"}
+OUT_DIR=${4:-"$FILE/outputs/"}
 
 #export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
-LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
-TRAIN_LANGS="en"
+#LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
+#TRAIN_LANGS="en"
+
+#LANGS="az,kk,uz,tr"
+#TRAIN_LANGS="tr"
+
+#LANGS="sw,da,no,is,fo"
+#TRAIN_LANGS="no"
+
+LANGS="sl,hr,sr,pl,cs"
+TRAIN_LANGS="cs"
+
+
 NUM_EPOCHS=10
 MAX_LENGTH=128
-MLM_WEIGHT=0
-MLM_LANG='zh,ko,ja'
-OPTIM='Adam'
-MLM_START=5
-MLM_END=10
 LR=2e-5
-ATTN_T=1
-UPDATE_PRETRAIN=0
+BPE_DROP=0
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -60,13 +65,9 @@ fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-for SEED in 1 2 3 4 5;
+for SEED in 3  4 5;
 do
-if [ $MLM_WEIGHT == 0 ]; then
-  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_up${UPDATE_PRETRAIN}_s${SEED}/"
-else
-  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_MLME${MLM_END}_optim${OPTIM}_s${SEED}/"
-fi
+OUTPUT_DIR="$OUT_DIR/${TASK}_${TRAIN_LANGS}/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_bped${BPE_DROP}_s${SEED}/"
 
 mkdir -p $OUTPUT_DIR
 python $REPO/third_party/run_tag.py \
@@ -92,12 +93,6 @@ python $REPO/third_party/run_tag.py \
   --eval_all_checkpoints \
   --eval_patience -1 \
   --overwrite_output_dir \
-  --optimizer $OPTIM \
-  --mlm_weight $MLM_WEIGHT \
-  --mlm_lang $MLM_LANG \
-  --mlm_start_epoch $MLM_START \
-  --mlm_end_epoch $MLM_END \
-  --attention_t $ATTN_T \
-  --update_pretrained_epoch $UPDATE_PRETRAIN \
+  --bpe_dropout $BPE_DROP \
   --save_only_best_checkpoint $LC
 done
