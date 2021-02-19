@@ -109,10 +109,12 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   # Prepare optimizer and schedule (linear warmup and decay)
   no_decay = ["bias", "LayerNorm.weight"]
-  if args.adapter:
-      named_params = [(n, p) for n, p in model.named_parameters() if "adapter" in n or "classifier" in n]
-  else:
-      named_params = [p for p in model.named_parameters()]
+  #if args.adapter:
+  #    named_params = [(n, p) for n, p in model.named_parameters() if "adapter" in n or "classifier" in n]
+  #else:
+  #    named_params = [p for p in model.named_parameters()]
+  adapter_named_params = [(n, p) for n, p in model.named_parameters() if "adapter" in n]
+  named_params = [(n, p) for n, p in model.named_parameters() if "adapter" not in n]
   optimizer_grouped_parameters = [
     {"params": [p for n, p in named_params if not any(nd in n for nd in no_decay)],
      "weight_decay": args.weight_decay},
@@ -124,6 +126,14 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       for p in group["params"]:
           param_count += p.numel()
   logger.info("  Num params = %d", param_count)
+  if args.adapter:
+    adapter_optimizer_grouped_parameters = [
+      {"params": [p for n, p in adapter_named_params if not any(nd in n for nd in no_decay)],
+       "weight_decay": args.weight_decay},
+      {"params": [p for n, p in adapter_named_params if any(nd in n for nd in no_decay)], "weight_decay": 0.0}
+    ]
+    adapter_optimizer = AdamW(adapter_optimizer_grouped_parameters, lr=args.adapter_learning_rate, eps=args.adam_epsilon)
+
   scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total)
   if args.fp16:
     try:
@@ -181,6 +191,13 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
   cur_epoch = 0
   for _ in train_iterator:
+    if args.sample_bpe_dropout_high > 0:
+      dropped_train_dataset = load_examples(args, tokenizer, labels, pad_token_label_id, mode="train", lang=args.train_langs, lang2id=lang2id, bpe_drop=args.bpe_dropout, few_shot=args.few_shot, sample_bpe_drop_low=args.sample_bpe_dropout_low, sample_bpe_drop_high=args.sample_bpe_dropout_high)
+      concat_train_dataset = ConcatDataset(train_dataset, dropped_train_dataset)
+
+      train_sampler = RandomSampler(concat_train_dataset) if args.local_rank == -1 else DistributedSampler(concat_train_dataset)
+      train_dataloader = DataLoader(concat_train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
     epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
     cur_epoch += 1
     if cur_epoch == args.update_pretrained_epoch and args.optimizer == 'RecAdam':
@@ -208,11 +225,6 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
 
       if args.model_type == "xlm":
         inputs["langs"] = batch[4]
-
-      outputs = model(**inputs)
-      loss = outputs[0]
-      kept_label_mask = outputs[-2]
-      logits = outputs[-1]
 
       if args.drop_tau > 0:
         # switchout
@@ -243,10 +255,56 @@ def train(args, train_dataset, dropped_train_dataset, model, tokenizer, labels, 
       if args.model_type == "xlm":
         dropped_inputs["langs"] = dropped_batch[4]
 
+      if args.adapter:
+        dropped_inputs["use_adapter"] = True
+
+
+
+
+      outputs = model(**inputs)
+      loss = outputs[0]
+      kept_label_mask = outputs[-2]
+      logits = outputs[-1]
+
       dropped_outputs = model(**dropped_inputs)
       dropped_loss = dropped_outputs[0]
       dropped_kept_label_mask = dropped_outputs[-2]
       dropped_logits = dropped_outputs[-1]
+
+      if args.adapter:
+        prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
+        dropped_log_prob = torch.nn.functional.log_softmax(dropped_logits[dropped_kept_label_mask], dim=1)
+        if len(prob) > len(dropped_log_prob):
+          prob = prob[:len(dropped_log_prob)]
+        elif len(prob) < len(dropped_log_prob):
+          dropped_log_prob = dropped_log_prob[:len(prob)]
+        kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+        kl = kl_loss(dropped_log_prob, prob)
+        adapter_loss = dropped_loss - kl
+        for n, p in model.named_parameters():
+            if "adapter" not in n:
+                p.requires_grad = False
+            else:
+                p.requires_grad = True
+        adapter_loss.backward()
+        adapter_optimizer.step()
+        adapter_optimizer.zero_grad()
+        for n, p in model.named_parameters():
+            if "adapter" not in n:
+                p.requires_grad = True
+            else:
+                p.requires_grad = False
+
+        outputs = model(**inputs)
+        loss = outputs[0]
+        kept_label_mask = outputs[-2]
+        logits = outputs[-1]
+
+        dropped_outputs = model(**dropped_inputs)
+        dropped_loss = dropped_outputs[0]
+        dropped_kept_label_mask = dropped_outputs[-2]
+        dropped_logits = dropped_outputs[-1]
+
 
       if args.kl_weight > 0:
         prob = torch.nn.functional.softmax(logits[kept_label_mask]/args.kl_t, dim=1)
@@ -495,49 +553,36 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode, l
     dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
   return dataset
 
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_drop=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
+def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, bpe_drop=0, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None, sample_bpe_drop_low=0, sample_bpe_drop_high=0):
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
   if args.local_rank not in [-1, 0] and not evaluate:
     torch.distributed.barrier()
 
   # Load data features from cache or dataset file
-  if bpe_drop > 0:
-    cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}_drop{}".format(mode, lang,
-      list(filter(None, args.model_name_or_path.split("/"))).pop(),
-      str(args.max_seq_length), bpe_drop))
-  else:
-    cached_features_file = os.path.join(args.data_dir, "cached_{}_{}_{}_{}".format(mode, lang,
-      list(filter(None, args.model_name_or_path.split("/"))).pop(),
-      str(args.max_seq_length)))
-  if os.path.exists(cached_features_file) and not args.overwrite_cache:
-    logger.info("Loading features from cached file %s", cached_features_file)
-    features = torch.load(cached_features_file)
-  else:
-    langs = lang.split(',')
-    logger.info("all languages = {}".format(lang))
-    features = []
-    for lg in langs:
-      data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
-      logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
-      examples = read_examples_from_file(data_file, lg, lang2id)
-      features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
-                          cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                          cls_token=tokenizer.cls_token,
-                          cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                          sep_token=tokenizer.sep_token,
-                          sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
-                          pad_on_left=bool(args.model_type in ["xlnet"]),
-                          pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                          pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-                          pad_token_label_id=pad_token_label_id,
-                          lang=lg,
-                          bpe_dropout=bpe_drop,
-                          )
-      features.extend(features_lg)
-    if args.local_rank in [-1, 0]:
-      logger.info("Saving features into cached file {}, len(features)={}".format(cached_features_file, len(features)))
-      torch.save(features, cached_features_file)
+  langs = lang.split(',')
+  logger.info("all languages = {}".format(lang))
+  features = []
+  for lg in langs:
+    data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
+    logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
+    examples = read_examples_from_file(data_file, lg, lang2id)
+    features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
+                        cls_token_at_end=bool(args.model_type in ["xlnet"]),
+                        cls_token=tokenizer.cls_token,
+                        cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
+                        sep_token=tokenizer.sep_token,
+                        sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
+                        pad_on_left=bool(args.model_type in ["xlnet"]),
+                        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+                        pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
+                        pad_token_label_id=pad_token_label_id,
+                        lang=lg,
+                        bpe_dropout=bpe_drop,
+                        sample_bpe_dropout_low=sample_bpe_drop_low,
+                        sample_bpe_dropout_high=sample_bpe_drop_high,
+                        )
+    features.extend(features_lg)
 
   # Make sure only the first process in distributed training process
   # the dataset, and the others will use the cache
@@ -614,6 +659,7 @@ def main():
             help="Number of updates steps to accumulate before performing a backward/update pass.")
   parser.add_argument("--learning_rate", default=5e-5, type=float,
             help="The initial learning rate for Adam.")
+  parser.add_argument("--adapter_learning_rate", default=2e-4, type=float)
   parser.add_argument("--weight_decay", default=0.0, type=float,
             help="Weight decay if we apply some.")
   parser.add_argument("--adam_epsilon", default=1e-8, type=float,
@@ -661,6 +707,8 @@ def main():
   parser.add_argument("--update_pretrained_epoch", type=int, default=0, help="wait N times of decreasing dev score before early stop during training")
 
   parser.add_argument("--bpe_dropout", default=0, type=float)
+  parser.add_argument("--sample_bpe_dropout_low", default=0, type=float)
+  parser.add_argument("--sample_bpe_dropout_high", default=0, type=float)
   parser.add_argument("--kl_weight", default=0, type=float)
   parser.add_argument("--kl_t", default=1, type=float)
   parser.add_argument("--fix_class", action='store_true')
@@ -913,62 +961,6 @@ def main():
         infile = os.path.join(args.data_dir, lang, "dev.{}".format(args.model_name_or_path))
         idxfile = infile + '.idx'
         save_predictions(args, predictions, output_test_predictions_file, infile, idxfile)
-
-def load_examples(args, tokenizer, labels, pad_token_label_id, mode, lang, lang2id=None, few_shot=-1, few_shot_extra_langs=None, few_shot_extra_langs_size=None):
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
-  if args.local_rank not in [-1, 0] and not evaluate:
-    torch.distributed.barrier()
-
-  # Load data features from cache or dataset file
-  bpe_dropout = args.bpe_dropout
-  if mode != 'train': bpe_dropout = 0
-  assert bpe_dropout > 0
-  langs = lang.split(',')
-  logger.info("all languages = {}".format(lang))
-  features = []
-  for lg in langs:
-    data_file = os.path.join(args.data_dir, lg, "{}.{}".format(mode, args.model_name_or_path))
-    logger.info("Creating features from dataset file at {} in language {}".format(data_file, lg))
-    examples = read_examples_from_file(data_file, lg, lang2id)
-    features_lg = convert_examples_to_features(examples, labels, args.max_seq_length, tokenizer,
-                        cls_token_at_end=bool(args.model_type in ["xlnet"]),
-                        cls_token=tokenizer.cls_token,
-                        cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-                        sep_token=tokenizer.sep_token,
-                        sep_token_extra=bool(args.model_type in ["roberta", "xlmr"]),
-                        pad_on_left=bool(args.model_type in ["xlnet"]),
-                        pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-                        pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-                        pad_token_label_id=pad_token_label_id,
-                        lang=lg,
-                        bpe_dropout=bpe_dropout,
-                        )
-    features.extend(features_lg)
-
-  # Make sure only the first process in distributed training process
-  # the dataset, and the others will use the cache
-  if args.local_rank == 0 and not evaluate:
-    torch.distributed.barrier()
-
-  if few_shot > 0 and mode == 'train':
-    logger.info("Original no. of examples = {}".format(len(features)))
-    features = features[: few_shot]
-    logger.info('Using few-shot learning on {} examples'.format(len(features)))
-
-  # Convert to Tensors and build dataset
-  all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-  all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
-  all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
-  all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-  if args.model_type == 'xlm' and features[0].langs is not None:
-    all_langs = torch.tensor([f.langs for f in features], dtype=torch.long)
-    logger.info('all_langs[0] = {}'.format(all_langs[0]))
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_langs)
-  else:
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-  return dataset
-
 
 def save_predictions(args, predictions, output_file, text_file, idx_file, output_word_prediction=False):
   # Save predictions

@@ -22,6 +22,7 @@ import logging
 import os
 from io import open
 from transformers import XLMTokenizer
+import random 
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,8 @@ def convert_examples_to_features(examples,
                  mask_padding_with_zero=True,
                  lang='en',
                  bpe_dropout=0,
+                 sample_bpe_dropout_low=0,
+                 sample_bpe_dropout_high=0,
                  dic_vocab=None,
                  dic_sample_prob=0):
   """ Loads a data file into a list of `InputBatch`s
@@ -366,7 +369,8 @@ def convert_examples_to_features(examples,
                 replaced_word = replaced_word[0].upper() + replaced_word[1:]
             word = replaced_word
             total_replaced_words += 1
-
+      if sample_bpe_dropout_high > 0:
+        bpe_dropout = random.uniform(sample_bpe_dropout_low, sample_bpe_dropout_high)
       if isinstance(tokenizer, XLMTokenizer):
         word_tokens = tokenizer.tokenize(word, lang=lang, dropout=bpe_dropout)
       else:
