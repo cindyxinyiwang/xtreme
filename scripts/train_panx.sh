@@ -19,26 +19,26 @@
 #SBATCH --mem=15GB
 
 REPO=$PWD
-GPU=${1:-0}
-#MODEL=${2:-bert-base-multilingual-cased}
-MODEL=${2:-xlm-roberta-base}
-DATA_DIR=${3:-"$REPO/download/"}
+GPU=${1:-1}
+MODEL=${2:-bert-base-multilingual-cased}
+#MODEL=${2:-xlm-roberta-base}
+DATA_DIR=${3:-"/home/xinyiw/download/"}
 OUT_DIR=${4:-"$REPO/outputs/"}
 
-#export CUDA_VISIBLE_DEVICES=$GPU
+export CUDA_VISIBLE_DEVICES=$GPU
 TASK='panx'
-LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
-TRAIN_LANGS="en"
+#LANGS="ar,he,vi,id,jv,ms,tl,eu,ml,ta,te,af,nl,en,de,el,bn,hi,mr,ur,fa,fr,it,pt,es,bg,ru,ja,ka,ko,th,sw,yo,my,zh,kk,tr,et,fi,hu"
+#TRAIN_LANGS="en"
+TRAIN_LANGS="cs"
+MIX_LANGS="sl"
+LANGS="hr,sl,pl,sr,cs"
+
 NUM_EPOCHS=10
 MAX_LENGTH=128
-MLM_WEIGHT=0
-MLM_LANG='zh,ko,ja'
 OPTIM='Adam'
-MLM_START=5
-MLM_END=10
 LR=2e-5
-ATTN_T=1
-UPDATE_PRETRAIN=0
+BPE_DROP=0.2
+MW=0.2
 
 LC=""
 if [ $MODEL == "bert-base-multilingual-cased" ]; then
@@ -60,18 +60,15 @@ fi
 
 DATA_DIR=$DATA_DIR/${TASK}/${TASK}_processed_maxlen${MAX_LENGTH}/
 
-for SEED in 1 2 3 4 5;
+for SEED in 1;
 do
-if [ $MLM_WEIGHT == 0 ]; then
-  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_optim${OPTIM}_up${UPDATE_PRETRAIN}_s${SEED}/"
-else
-  OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_MLMW${MLM_WEIGHT}_MLML${MLM_LANG}_MLMS${MLM_START}_MLME${MLM_END}_optim${OPTIM}_s${SEED}/"
-fi
+OUTPUT_DIR="$OUT_DIR/$TASK/${MODEL}-LR${LR}-epoch${NUM_EPOCHS}-MaxLen${MAX_LENGTH}-TrainLang${TRAIN_LANGS}_mixlang${MIX_LANGS}_m${MW}_s${SEED}/"
 
 mkdir -p $OUTPUT_DIR
-python $REPO/third_party/run_tag.py \
-  --do_train \
+python $REPO/third_party/run_mix_tag.py \
   --do_eval \
+  --do_train \
+  --mix_weight $MW \
   --data_dir $DATA_DIR \
   --model_type $MODEL_TYPE \
   --labels $DATA_DIR/labels.txt \
@@ -88,16 +85,10 @@ python $REPO/third_party/run_tag.py \
   --do_predict \
   --predict_langs $LANGS \
   --train_langs $TRAIN_LANGS \
+  --mix_langs $MIX_LANGS \
   --log_file $OUTPUT_DIR/train.log \
   --eval_all_checkpoints \
   --eval_patience -1 \
   --overwrite_output_dir \
-  --optimizer $OPTIM \
-  --mlm_weight $MLM_WEIGHT \
-  --mlm_lang $MLM_LANG \
-  --mlm_start_epoch $MLM_START \
-  --mlm_end_epoch $MLM_END \
-  --attention_t $ATTN_T \
-  --update_pretrained_epoch $UPDATE_PRETRAIN \
   --save_only_best_checkpoint $LC
 done
